@@ -4,7 +4,13 @@ from reviewpilot.config import MAX_LOOPS_CAP, Settings
 from reviewpilot.github import PullRequest
 from reviewpilot.graph import RECURSION_LIMIT, build_graph, run_review
 from reviewpilot.llm import FakeModel, fake_factory
-from reviewpilot.models import AgentOutput, Finding, FindingDecision, JudgeVerdict
+from reviewpilot.models import (
+    AgentFeedback,
+    AgentOutput,
+    Finding,
+    FindingDecision,
+    JudgeVerdict,
+)
 from reviewpilot.state import initial_state
 
 PATCH = "@@ -1,2 +1,4 @@\n import os\n+x = 1\n+y = x / 0\n def f():"
@@ -55,7 +61,8 @@ def judge(decision="confirm", retry=(), feedback=None, decisions=None):
             choice = (decisions or {}).get(title, decision)
             if choice is not None:  # None = the judge says nothing about this finding
                 out.append(FindingDecision(finding_id=fid, decision=choice))
-        return JudgeVerdict(decisions=out, retry_agents=list(retry), feedback=feedback or {})
+        notes = [AgentFeedback(agent=a, feedback=t) for a, t in (feedback or {}).items()]
+        return JudgeVerdict(decisions=out, retry_agents=list(retry), feedback=notes)
 
     return respond
 
@@ -76,7 +83,11 @@ def judge_text(model: FakeModel, call: int) -> str:
 
 
 def run(models: dict, settings: Settings | None = None, github=None) -> dict:
-    graph = build_graph(settings or Settings(), fake_factory(models), github or FakeGitHub())
+    """Run the graph. Enabled agents the test does not care about find nothing."""
+    settings = settings or Settings()
+    for name in settings.reviewers():
+        models.setdefault(name, agent_says())
+    graph = build_graph(settings, fake_factory(models), github or FakeGitHub())
     return run_review(graph, "o/r", 1)
 
 
@@ -96,9 +107,10 @@ def test_num_agents_two_runs_exactly_quality_and_correctness():
     result = run({"quality": q, "correctness": c, "judge": j}, Settings(num_agents=2))
     assert {u["node"] for u in result["usage"]} == {"quality", "correctness", "judge"}
 
-    # num_agents=1 builds and runs quality only; no correctness model is even requested.
-    result = run({"quality": agent_says("q1"), "judge": FakeModel(judge())}, Settings(num_agents=1))
-    assert {u["node"] for u in result["usage"]} == {"quality", "judge"}
+    # num_agents=1 builds and runs correctness only; no quality model is even requested.
+    models = {"correctness": agent_says("c1"), "judge": FakeModel(judge())}
+    result = run(models, Settings(num_agents=1))
+    assert {u["node"] for u in result["usage"]} == {"correctness", "judge"}
 
 
 # 3
@@ -194,10 +206,12 @@ def test_one_agent_raises_other_survives_status_partial():
     assert "quality blew up" in result["summary"]
 
 
-def test_both_agents_raise_status_failed():
-    q = FakeModel([RuntimeError("q down")])
-    c = FakeModel([RuntimeError("c down")])
-    result = run({"quality": q, "correctness": c, "judge": FakeModel([])})
+def test_all_agents_raise_status_failed():
+    models = {
+        name: FakeModel([RuntimeError(f"{name} down")])
+        for name in ("correctness", "security", "quality")
+    }
+    result = run({**models, "judge": FakeModel([])})
     assert result["status"] == "failed"
     assert "No issues found" not in result["summary"]
 
@@ -218,9 +232,8 @@ def test_judge_raises_status_failed_nothing_accepted():
 def test_trace_node_order_for_one_retry():
     q, c = agent_says("q1"), agent_says("c1")
     j = FakeModel(sequence(judge(retry=["correctness"]), judge()))
-    graph = build_graph(
-        Settings(), fake_factory({"quality": q, "correctness": c, "judge": j}), FakeGitHub()
-    )
+    models = {"quality": q, "correctness": c, "security": agent_says(), "judge": j}
+    graph = build_graph(Settings(), fake_factory(models), FakeGitHub())
 
     trace = [
         node
@@ -230,9 +243,9 @@ def test_trace_node_order_for_one_retry():
         for node in update
     ]
 
-    assert trace[0] == "fetch_pr"
-    assert sorted(trace[1:3]) == ["correctness", "quality"]  # parallel, order not fixed
-    assert trace[3:] == ["validate", "judge", "correctness", "validate", "judge", "post_review"]
+    assert trace[:2] == ["fetch_pr", "router"]
+    assert sorted(trace[2:5]) == ["correctness", "quality", "security"]  # parallel, any order
+    assert trace[5:] == ["validate", "judge", "correctness", "validate", "judge", "post_review"]
 
 
 def test_no_reviewable_files_skips_agents():
@@ -253,3 +266,38 @@ def test_finding_id_is_stable_and_hidden_from_model_schema():
 
     props = AgentOutput.model_json_schema()["$defs"]["Finding"]["properties"]
     assert "agent" not in props and "round" not in props
+
+
+def test_router_runs_only_routed_agents_and_records_reasons():
+    docs_patch = "@@ -1 +1,2 @@\n # Title\n+More words."
+    github = FakeGitHub([{"filename": "README.md", "status": "modified", "patch": docs_patch}])
+    c, s, q = agent_says("c1"), agent_says("s1"), agent_says("q1")
+    result = run(
+        {"correctness": c, "security": s, "quality": q, "judge": FakeModel(judge())},
+        github=github,
+    )
+
+    assert result["route"] == ["quality"]
+    assert result["route_reasons"]["quality"] == "docs only PR"
+    assert c.calls == s.calls == []
+    assert len(q.calls) == 1
+    assert result["summary"].index("Route: quality") < result["summary"].index("### app.py")
+
+
+def test_retry_feedback_reaches_agent_in_feedback_block_with_file_prompt():
+    c = agent_says("c1")
+    j = FakeModel(
+        sequence(
+            judge("reject", retry=["correctness"], feedback={"correctness": "line 3 divides by 0"}),
+            judge(),
+        )
+    )
+    run({"correctness": c, "judge": j})
+
+    first, second = c.calls
+    assert "<judge_feedback>" not in first[-1].content
+    assert "<judge_feedback>\nline 3 divides by 0\n</judge_feedback>" in second[-1].content
+    system_text = second[0].content[0]["text"]
+    assert "Role: correctness reviewer" in system_text
+    assert second[0].content[0]["cache_control"] == {"type": "ephemeral"}
+    assert "<untrusted_pr>" in second[-1].content

@@ -1,14 +1,17 @@
 # ReviewPilot
 
-A LangGraph code review agent. When a pull request is opened or updated, a GitHub Action runs
-ReviewPilot. It reads the diff, sends it to two specialist sub agents that review in parallel,
-checks every finding against the real code, lets a judge model confirm or reject each one, and
-then posts inline comments on the exact lines plus one sticky summary comment on the PR.
+A LangGraph code review agent with specialist sub agents, a judge loop, human approval and a
+streaming Next.js UI. You paste a GitHub PR link into the web app; a router picks which specialist
+reviewers run; up to three Claude sub agents review in parallel while the UI streams progress;
+plain code checks every finding against the real diff; a judge model confirms or rejects each
+one; then the graph pauses so a human can approve, edit or reject every comment before anything
+is posted to GitHub (inline comments plus one sticky summary).
 
 Core idea: the agent does the first pass, a human does the last. Few comments, high signal, no
 made up line numbers.
 
-Full plan: [docs/ReviewPilot_Action_Plan.pdf](docs/ReviewPilot_Action_Plan.pdf).
+Plans: [docs/ReviewPilot_Action_Plan_v2.pdf](docs/ReviewPilot_Action_Plan_v2.pdf) is current.
+[docs/ReviewPilot_Action_Plan.pdf](docs/ReviewPilot_Action_Plan.pdf) (v1) is history only.
 
 ## Working rules
 
@@ -17,176 +20,191 @@ Full plan: [docs/ReviewPilot_Action_Plan.pdf](docs/ReviewPilot_Action_Plan.pdf).
 - Every stage ends with tests passing and ruff clean:
   `uv run ruff check . && uv run ruff format --check . && uv run pytest`
 - LLM calls go through a factory so tests use a fake model. **Tests never call real APIs**
-  (GitHub included: use `httpx.MockTransport`).
+  (GitHub included: use `httpx.MockTransport` or a fake client). The one live test is marked
+  `@pytest.mark.live` and skipped unless `RUN_LIVE=1`.
 - Parallel LangGraph nodes return only the state keys they own. Shared lists use `Annotated`
   reducers (`operator.add`). This avoids `InvalidUpdateError`.
 - Never commit secrets. Keys live in `.env`, which is gitignored. `.env.example` lists the names.
 - Keep code simple and readable. No extra abstractions we don't need yet.
-- Commit messages and PR descriptions carry no AI attribution: no `Co-Authored-By` trailer and no
-  "Generated with" line.
+- Commit messages and PR descriptions carry no AI attribution: no `Co-Authored-By` trailer, no
+  "Generated with" line, no tool mentions.
 
 ## Architecture
 
 ```
-PR opened / synchronized / reopened  ->  GitHub Action fires
+Next.js UI: paste a PR link (main path)      GitHub Action on PR (bonus auto mode, Stage 10)
+                      \                        /
   fetch_pr        diff, numbered lines, skip rules
-    |-- fan out (parallel, LangGraph Send) --|
-  quality agent                       correctness agent
-  (readability, naming, tests)        (bugs, edge cases, security)
+  router          plain code: picks which agents run, with a reason per agent
+    |-- fan out (parallel, LangGraph Send) ------------------|
+  correctness          security                 quality (and tests)
+  bugs, logic,         injection, secrets,      readability, naming,
+  edge cases           auth, deserialization    duplication, missing tests
     |-- fan in --|
-  validate        plain code: line in diff? evidence real? dedupe
-  judge (LLM)     confirm / reject / downgrade; may send an agent back with feedback
-                  (retry loop: default 2 rounds, hard cap 15 enforced in code)
-  post_review     inline comments + sticky summary
+  validate        plain code: on an added line? evidence real? dedupe (Stage 4)
+  judge (LLM)     confirm / reject / downgrade; may send agents back with feedback
+                  (retry loop: default 2 retries, hard cap 15 rounds enforced in code)
+  human approval  interrupt(); approve, edit, reject in the UI (Stage 6)
+                  checkpointer saves state: SQLite dev, Postgres prod
+  post_review     inline comments on added lines + sticky summary (Stage 5)
 ```
 
-The trigger is just the doorbell; LangGraph is the brain. A FastAPI webhook can be added later as
-a second front door without changing the graph.
+The engine (fetch, router, agents, validate, judge) is the same whichever front door starts it.
+The checkpointer is what lets the graph stop at approval and pick up later, even after a restart.
 
-## Key design decisions
+## Key design decisions (v2)
 
 | Decision | Why |
 |---|---|
-| 2 sub agents first (Quality, Correctness) | Cheaper, faster, easier to evaluate. Security and Tests agent is a later stage |
-| Parallel fan out with LangGraph `Send` | Latency is about one LLM call, not two |
-| Parallel nodes return only their own keys | Avoids `InvalidUpdateError`; shared lists use `Annotated` add reducer |
-| Structured output with Pydantic | Every finding has file, line, severity, evidence, confidence. Bad output is dropped, never posted |
-| Validate in plain code before the judge | A finding must point to a line in the diff and quote code that is really there |
-| Judge loop with a hard cap in code | Default 2 retry rounds, configurable, absolute cap 15. The model cannot talk its way past it |
-| Fail soft | If one agent fails, post what the other found and say so. Never claim "no issues" after a failed run |
-| Untrusted input | PR title, body and diff go inside delimited blocks; prompt says not to follow instructions in them |
-| Comment budget | Max 20 inline comments per PR, sorted by severity. The rest go in the summary |
-| GitHub Action on `pull_request` | No server. Permissions: contents read, pull requests write. Fork PRs are skipped |
+| Router node as a light supervisor | Skips agents that do not apply (no security pass on a docs only PR). Routing is also something LangSmith can score |
+| Parallel fan out with `Send` | Agents run at the same time, so latency is about one LLM call |
+| Parallel nodes return only their own keys | Avoids `InvalidUpdateError`. Shared lists use `Annotated` reducers |
+| Structured output with Pydantic | Bad output is dropped, never posted |
+| Validate in plain code before the judge | A finding must point to an added line and quote code that is really there |
+| Judge loop with a hard cap in code | Default 2 retries, absolute cap 15 rounds. The model cannot talk its way past it |
+| `interrupt()` before post_review | Nothing reaches GitHub without a human yes. Resume with `Command(resume=decisions)` |
+| `thread_id = repo#pr@head_sha` | One saved review per commit, so a restart resumes the right one |
+| Stream graph events to the UI over SSE | Each agent's progress shows live, which is the demo's strongest moment |
+| Fail soft and be honest | If an agent fails, show what the others found. Never claim no issues after a failure |
 
 ## Decisions made during the build
 
+- **Agents and `num_agents`:** correctness, security, quality (quality covers tests too).
+  `Settings.reviewers()`: 1 = correctness, 2 = correctness + quality, 3 = all (default 3).
+- **Router rules** (`router.py`, plain code, from reviewable paths): docs only (md, txt, rst) ->
+  quality; tests only (test files, optionally plus docs) -> correctness + quality; any code -> all
+  enabled; security is added whenever a path matches auth, login, token, secret, password,
+  crypto, sql, query, or looks like config (yml, yaml, toml, ini, cfg, conf, .env, names with
+  config or settings, Dockerfile). `num_agents` is the upper limit: the route is the
+  intersection with the enabled set, so it can be empty (e.g. docs only with `num_agents=1`); then
+  no agent runs and the summary says nothing was reviewed. `route_reasons` records a reason for
+  every agent, including skipped ones, for LangSmith routing evals.
+- **Prompts** live in `reviewpilot/prompts/*.md`, loaded at runtime. The rules every agent must
+  follow (added lines only, exact evidence, severity rubric, max 8 findings, zero is fine, stay in
+  your lane, untrusted input, retry feedback) are in one shared `agent_rules.md`, appended to each
+  agent's own prompt by `agent_system_prompt()`. The judge also sees the numbered diff.
+- **Model calls** (`llm.py`): `ChatAnthropic` with `with_structured_output(..., method="json_schema",
+  include_raw=True)`. **No temperature**: current Claude models (Haiku 5.5, Sonnet 5.5) return 400
+  for non-default sampling values, so the user's "temperature 0" is not possible. `json_schema`
+  (the API's structured output format) rather than function calling, because forced tool choice
+  is rejected by Sonnet 5.5. `max_tokens` 16000, request timeout 120 s, SDK retries 3 (429 / 5xx /
+  network; separate from the judge loop). Model ids come from `REVIEWPILOT_AGENT_MODEL` and
+  `REVIEWPILOT_JUDGE_MODEL`.
+- **Structured output schema limits:** the API cannot express free-form object keys or numeric
+  min/max. So `JudgeVerdict.feedback` is a list of `{agent, feedback}` (not a dict), and
+  `Finding.confidence` is clamped to 0..1 in a validator instead of a schema constraint.
+- **Usage and cost:** every model call appends `{node, round, model, input_tokens, output_tokens,
+  cache_read_tokens, cache_write_tokens, latency_ms, cost_usd}` to `usage`; the judge's entry also
+  has `judged` and `accepted` counts. `config.PRICING` (checked 2026-11-20 against
+  platform.claude.com/docs/en/about-claude/pricing) includes Haiku 5.5's higher price tier for
+  prompts over 100k tokens. Unparseable output is an error, but its usage is still recorded.
+- **Prompt caching:** system prompts carry `cache_control: ephemeral` (langchain-anthropic passes
+  it through cleanly). Haiku 5.5 / Sonnet 5.5 cache prefixes of 512+ tokens; our system prompts
+  are around that size, so check `cache_read_tokens` in usage to confirm hits.
+- **Dry run output:** route and reasons, then findings grouped by file, then a footer with status,
+  rounds, judged / confirmed / rejected counts, tokens, estimated cost and total time.
 - **Inline comments go on added lines only** (`FileDiff.added_lines`). A finding on an unchanged
   context line is still allowed (it is in `valid_lines`) but goes into the summary, not inline.
-  Fewer, sharper comments.
 - **Oversized patches** are truncated at a hunk boundary and marked `truncated`; a file is skipped
   only if its first hunk alone exceeds `max_patch_chars`. Removed files are skipped.
-- **`FileDiff`** and `SkippedFile` are Pydantic models in `models.py` (moved in Stage 2).
-- **`num_agents`** picks agents via `Settings.reviewers()` in the order quality, correctness
-  (so `num_agents=1` runs quality only).
 - **Rounds:** round 1 is the first pass. `max_retries` counts retry rounds (default 2, so up to 3
-  rounds). `MAX_LOOPS_CAP = 15` caps total rounds (first pass + retries), checked in
-  `judge.make_router`; config can only lower it.
-- **Judge semantics:** findings the judge does not decide on are dropped; `downgrade` without a
-  `new_severity` drops one level; `retry_agents` names not in `reviewers()` are ignored. If a round
-  has no candidates, the judge is not called and the loop ends.
-- **`candidates`** state key: `validate` writes the current round's findings there (overwrite), and
-  the judge reads it. `findings` is append-only so it cannot be filtered in place.
-- **Finding ids:** `Finding.id` is a 12 char sha1 of agent, file, line, title. `agent` and `round`
-  are set by our code and hidden from the model's JSON schema (`SkipJsonSchema`).
-- **Status:** `failed` if the judge errored or every agent failed on round 1 (then nothing is
-  reported as confirmed); `partial` if any other error; else `success`. Computed in `post_review`.
-- **CLI during development:** `--fake` runs the whole graph with demo fakes (no key);
-  `--diff-only` prints the numbered diff; without either, the CLI refuses until Stage 3.
+  rounds). `MAX_LOOPS_CAP = 15` caps total rounds, checked in `judge.make_router`; config can only
+  lower it.
+- **Judge semantics:** findings the judge does not decide on are dropped (silence = reject);
+  `downgrade` without a `new_severity` drops one level; `retry_agents` not in this PR's route are
+  ignored; if a round has no candidates, the judge is not called and the loop ends.
+- **Stage 4 dedupe** must also check new findings against `accepted` from earlier rounds, not just
+  within the current round (round is not part of `Finding.id`).
+- **`candidates`** state key: `validate` writes the current round's findings there; the judge
+  reads it. `findings` is append-only.
+- **Finding ids:** 12 char sha1 of agent, file, line, title. `agent` and `round` are set by our
+  code and hidden from the model's JSON schema (`SkipJsonSchema`).
+- **Status:** `failed` if the judge errored or every routed agent failed on round 1 (then nothing
+  is reported as confirmed); `partial` if any other error; else `success`.
+- **CLI:** real review needs `ANTHROPIC_API_KEY`; `--fake` runs the whole graph with demo fakes;
+  `--diff-only` prints the numbered diff.
 - **Models:** defaults are `claude-sonnet-5-5` (agents) and `claude-haiku-5-5` (judge). During
-  development the local `.env` sets both to Haiku to save credits.
+  development `.env` sets both to Haiku to save credits.
 - **Ruff** excludes `*.md` (it would otherwise reformat code sketches in Markdown).
-- **Sandbox repo:** `sa1136/reviewpilot-sandbox` is where test PRs with planted bugs are raised.
-
-## Data model
-
-```python
-class Finding(BaseModel):
-    file: str                 # path in the PR
-    line: int                 # new side line number from the numbered diff
-    severity: Literal["critical", "major", "minor", "nit"]
-    category: str             # bug, edge_case, security, naming, tests ...
-    title: str                # one line
-    body: str                 # why it matters, 1 to 3 sentences
-    suggestion: str | None    # optional fix
-    evidence: str             # exact code quoted from the diff
-    confidence: float         # 0 to 1
-    agent: str                # "quality" or "correctness"
-
-class ReviewState(TypedDict):
-    repo: str; pr_number: int; head_sha: str
-    files: list[FileDiff]                              # path, patch, numbered_patch, valid_lines
-    findings: Annotated[list[Finding], operator.add]   # sub agents append
-    accepted: Annotated[list[Finding], operator.add]   # judge appends
-    round: int
-    retry_agents: list[str]
-    judge_feedback: dict[str, str]
-    summary: str; status: str                          # success | partial | failed
-    usage: dict                                        # tokens and cost per node
-```
-
-Actual definitions: `reviewpilot/models.py` and `reviewpilot/state.py` (the state also has
-`pr_title`, `pr_body`, `skipped`, `candidates` and `errors`; `usage` is an append list).
+- **Sandbox repo:** `sa1136/reviewpilot-sandbox`. Planted bug PRs have answer keys in
+  `evals/planted/` (PR #1: `evals/planted/pr1.md`); these feed the Stage 9 LangSmith dataset.
 
 ## Repo structure
 
 ```
-reviewpilot/
-  config.py      settings from env (agents, max_retries, limits, models, skip globs)
-  models.py      Pydantic: FileDiff, Finding, AgentOutput, FindingDecision, JudgeVerdict
-  state.py       ReviewState TypedDict and initial_state()
-  llm.py         model factory (get_model), FakeModel, demo fakes for --fake
-  github.py      fetch PR, files; post review, sticky summary (Stage 5)
-  diff.py        parse hunks, number lines, valid line set, skip rules
-  prompts/       quality.md, correctness.md, judge.md                    (Stage 3)
-  agents.py      sub agent nodes (placeholder prompts until Stage 3)
-  validate.py    deterministic checks and dedupe (pass through until Stage 4)
-  judge.py       judge node and retry routing with the hard cap
-  graph.py       StateGraph wiring, fetch_pr, post_review, status and summary
-  cli.py         python -m reviewpilot --repo o/r --pr 12 --dry-run
-tests/           unit and graph path tests with a fake LLM
-evals/           seeded bug PRs and a scoring script                     (Stage 7)
-docs/            action plan
-.github/workflows/  ci.yml, reviewpilot.yml (Stage 6)
+reviewpilot/                # the engine (Python)
+  config.py   settings from env, agent sets, pricing and cost estimate
+  models.py   Pydantic: FileDiff, SkippedFile, Finding, AgentOutput, FindingDecision, JudgeVerdict
+  state.py    ReviewState TypedDict and initial_state()
+  llm.py      model factory (get_model), call_model + usage, FakeModel, demo fakes for --fake
+  github.py   fetch PR and files (posting in Stage 5)
+  diff.py     parse hunks, number lines, valid / added line sets, skip rules
+  router.py   picks agents from changed paths
+  agents.py   sub agent nodes
+  validate.py deterministic checks and dedupe (pass through until Stage 4)
+  judge.py    judge node and retry routing with the hard cap
+  approval.py interrupt() and resume                                    (Stage 6)
+  graph.py    StateGraph wiring, fetch_pr, router node, post_review, summary
+  cli.py      python -m reviewpilot --repo o/r --pr 12 --dry-run
+  prompts/    correctness.md security.md quality.md judge.md agent_rules.md
+api/          FastAPI: start review, SSE stream, approve, post          (Stage 7, not created yet)
+web/          Next.js + TypeScript UI                                   (Stage 8, not created yet)
+evals/        planted bug answer keys; LangSmith dataset and evaluators (Stage 9)
+tests/
+docs/         action plans
+.github/workflows/  ci.yml; reviewpilot.yml auto mode                  (Stage 10)
 ```
 
-## Build stages
+## Build stages (v2)
 
-- [x] **Stage 0. Setup** — pyproject with uv, ruff, pytest, `.env.example`, README stub, `ci.yml`.
-  Done when: pytest and ruff pass on an empty project and CI is green.
-- [x] **Stage 1. GitHub client and diff parsing** — `github.py` fetches PR metadata and changed
-  files with pagination (httpx); `diff.py` parses hunks, builds a numbered patch, computes valid new
-  side lines; skip lockfiles, build output, images; cap files (40) and patch size per file.
-  Done when: CLI prints the numbered diff of a real sandbox PR; unit tests for hunk parsing.
-- [x] **Stage 2. LangGraph skeleton** — `models.py`, `config.py`, `graph.py` with nodes fetch_pr,
-  quality, correctness, validate, judge, post_review; fan out with `Send`, `Annotated` reducers,
-  conditional retry edge; LLM injected via a factory. Done when: graph runs end to end with a fake
-  LLM and a test asserts both agents ran.
-- [ ] **Stage 3. The two sub agents** — prompts with do / do not lists; Claude via
-  `with_structured_output(AgentOutput)`; untrusted data in delimited blocks; tokens and latency per
-  node. Done when: dry run on a sandbox PR with planted bugs prints sensible findings.
-- [ ] **Stage 4. Validate, judge and the loop** — drop findings on lines not in the diff or with
-  evidence not in the code; dedupe by file, line, title; judge confirms / rejects / downgrades and
-  can send an agent back with feedback; max_retries default 2, hard cap 15 in code; drop low
-  confidence. Done when: tests prove the loop stops at the cap and rejected findings never reach
-  posting.
-- [ ] **Stage 5. Post to GitHub** — one PR review with inline comments (side RIGHT); one sticky
-  summary found by a hidden marker and updated on each push; `--dry-run` prints instead of posting.
-  Done when: comments appear on the sandbox PR in the right places.
-- [ ] **Stage 6. GitHub Action** — `reviewpilot.yml` on pull_request opened / synchronize /
-  reopened; contents read, pull requests write; `ANTHROPIC_API_KEY` as a repo secret; skip fork PRs.
-  Done when: opening a sandbox PR produces a review by itself.
-- [ ] **Stage 7. Evals and numbers** — 10 to 15 seeded bug PRs plus clean PRs; measure caught bugs,
-  false positives, cost, latency; compare 1 vs 2 rounds. Done when: results table in README.
-- [ ] **Stage 8. Stretch** — Security and Tests agent behind a flag; FastAPI webhook with HMAC and a
-  queue; incremental review of new commits; cost footer.
+- [x] **Stage 0. Setup** — repo, uv, ruff, pytest, CI.
+- [x] **Stage 1. GitHub client and diff parsing.**
+- [x] **Stage 2. LangGraph skeleton**, fake model, judge loop wiring.
+- [ ] **Stage 3. Router plus 3 real Claude sub agents and prompts** — prompts as files; router
+  picks agents from changed files; real Claude calls with structured output, usage and cost
+  logging; planted bug PR #1 in the sandbox and a first dry run. Done when: a table of planted bugs
+  caught, false positives, and cost per run. *Status: code, tests and PR #1 done; real dry run
+  waiting for `ANTHROPIC_API_KEY` in `.env`.*
+- [ ] **Stage 4. Validate, judge and the loop** — drop findings not on an added line or with
+  evidence not in the code; dedupe across rounds and against accepted; judge prompt tuned on PR #1;
+  retry only the agents that were mostly wrong. Done when: fewer false positives on PR #1 than
+  Stage 3, and tests for every rule.
+- [ ] **Stage 5. Post to GitHub** — one PR review with inline comments on added lines, one sticky
+  summary found by a hidden marker. Done when: comments land in the right places on the sandbox PR.
+- [ ] **Stage 6. Human approval and persistence** — `interrupt()` before post_review with the
+  pending comments as payload; resume with `Command(resume=...)` holding approve / edit / reject
+  per comment; SqliteSaver for dev, PostgresSaver behind an env flag; thread_id `repo#pr@sha`; CLI
+  approval mode. Done when: stop at approval, restart, resume and post.
+- [ ] **Stage 7. FastAPI backend** — `POST /reviews` starts a run, `GET /reviews/{id}/events`
+  streams graph updates over SSE, GET pending comments, POST decisions to resume, review history.
+  Done when: a curl session can start, watch, approve and post a review.
+- [ ] **Stage 8. Next.js UI** — paste a PR link, one live card per agent (running, done, findings
+  count); approval screen with file, line, code, severity, approve / edit / reject, post; review
+  history. Done when: a full demo in the browser from link to comments on GitHub.
+- [ ] **Stage 9. LangSmith evals** — 10 to 15 seeded bug PRs plus clean PRs with an answer key;
+  evaluators for bugs caught, false positives, routing, trajectory, cost and latency; compare 2 vs
+  3 agents, 1 vs 3 judge rounds, Haiku vs Sonnet. Done when: results table in the README.
+- [ ] **Stage 10. Bonus** — GitHub Action auto mode, deploy (Vercel plus a hosted API and
+  Postgres), GitHub App for a bot identity.
 
 ## Risks
 
 | Risk | Plan |
 |---|---|
-| Made up line numbers | Numbered diff in the prompt plus validation against the valid line set |
-| Noisy, nitpicky comments | Severity and confidence threshold, judge favors dropping, comment budget |
-| Cost runaway | Retry cap in code, Haiku for the judge, file and token limits, usage logged per run |
-| Huge PRs | Skip rules, per file limits, summary says what was skipped |
-| Prompt injection in PR text | Delimited untrusted blocks, schema enforced output, no tools that write code |
-| Duplicate reviews on every push | Sticky summary and one review per head commit |
+| Made up line numbers | Numbered diff in the prompt plus validation against added lines |
+| Noisy comments | Severity and confidence threshold, judge favors dropping, human approval as the last gate |
+| Cost runaway | Retry cap in code, Haiku while building, file and token limits, usage logged per run |
+| Scope creep from the UI | Engine first (Stages 3 to 6), UI after; keep the UI to two screens |
+| Prompt injection in PR text | Delimited untrusted blocks, schema enforced output, nothing posts without approval |
 
 ## Commands
 
 ```bash
 uv sync                                            # install
-uv run pytest                                      # tests
+uv run pytest                                      # tests (live test skipped)
+RUN_LIVE=1 uv run pytest -m live                   # one real API call, costs a little
 uv run ruff check . && uv run ruff format --check .
+uv run python -m reviewpilot --repo owner/name --pr 12 --dry-run          # real review, printed
 uv run python -m reviewpilot --repo owner/name --pr 12 --dry-run --fake   # full graph, fake model
 uv run python -m reviewpilot --repo owner/name --pr 12 --diff-only        # numbered diff only
 ```

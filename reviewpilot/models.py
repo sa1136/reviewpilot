@@ -3,7 +3,7 @@
 import hashlib
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from pydantic.json_schema import SkipJsonSchema
 
 Severity = Literal["critical", "major", "minor", "nit"]
@@ -35,10 +35,16 @@ class Finding(BaseModel):
     body: str = Field(description="Why it matters, 1 to 3 sentences")
     suggestion: str | None = Field(default=None, description="Optional fix")
     evidence: str = Field(description="Exact code quoted from the diff")
-    confidence: float = Field(ge=0, le=1)
+    confidence: float = Field(description="0 to 1")
     # Set by our code after the model answers, so they are hidden from the model's schema.
     agent: SkipJsonSchema[str] = ""
     round: SkipJsonSchema[int] = 0
+
+    @field_validator("confidence")
+    @classmethod
+    def _clamp_confidence(cls, value: float) -> float:
+        # The API cannot enforce min/max in the schema, so clamp instead of dropping the output.
+        return min(max(value, 0.0), 1.0)
 
     @property
     def id(self) -> str:
@@ -59,7 +65,16 @@ class FindingDecision(BaseModel):
     reason: str = ""
 
 
+class AgentFeedback(BaseModel):
+    agent: str
+    feedback: str
+
+
 class JudgeVerdict(BaseModel):
     decisions: list[FindingDecision] = Field(default_factory=list)
     retry_agents: list[str] = Field(default_factory=list)
-    feedback: dict[str, str] = Field(default_factory=dict)
+    # A list, not a dict: the API's structured output cannot express free-form object keys.
+    feedback: list[AgentFeedback] = Field(default_factory=list)
+
+    def feedback_for(self, agent: str) -> str:
+        return "\n".join(f.feedback for f in self.feedback if f.agent == agent)

@@ -1,11 +1,11 @@
 # ReviewPilot
 
-A LangGraph code review agent that runs on every pull request through GitHub Actions. Two Claude
-sub agents (Quality and Correctness) review the diff in parallel, plain code checks every finding
-against the real diff, a judge model confirms or rejects each one, and ReviewPilot posts inline
-comments plus one sticky summary on the PR.
+A LangGraph code review agent. A router picks which specialist Claude reviewers to run on a pull
+request (correctness, security, quality and tests), they review the diff in parallel, plain code
+checks every finding against the real diff, a judge model confirms or rejects each one, and a
+human approves comments before anything is posted to GitHub.
 
-> Work in progress. See [docs/ReviewPilot_Action_Plan.pdf](docs/ReviewPilot_Action_Plan.pdf).
+> Work in progress. See [docs/ReviewPilot_Action_Plan_v2.pdf](docs/ReviewPilot_Action_Plan_v2.pdf).
 
 ## Setup
 
@@ -16,7 +16,13 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY and GITHUB_TOKEN
 
 ## Usage
 
-Run the whole review graph on a real PR with a fake model (no Anthropic key, nothing posted):
+Review a real PR with Claude and print the result (needs `ANTHROPIC_API_KEY`, nothing posted):
+
+```bash
+uv run python -m reviewpilot --repo owner/name --pr 12 --dry-run
+```
+
+Run the whole review graph with a fake model (no Anthropic key, no cost):
 
 ```bash
 uv run python -m reviewpilot --repo owner/name --pr 12 --dry-run --fake

@@ -1,5 +1,6 @@
 """Command line entry point.
 
+python -m reviewpilot --repo owner/name --pr N --dry-run          # real Claude review, printed
 python -m reviewpilot --repo owner/name --pr N --dry-run --fake   # full graph, fake model
 python -m reviewpilot --repo owner/name --pr N --diff-only        # just the numbered diff
 """
@@ -13,7 +14,7 @@ from reviewpilot.config import Settings
 from reviewpilot.diff import build_file_diffs
 from reviewpilot.github import GitHubClient
 from reviewpilot.graph import build_graph, run_review
-from reviewpilot.llm import demo_fake_factory
+from reviewpilot.llm import demo_fake_factory, real_model_factory
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -52,16 +53,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     settings = Settings.from_env()
 
-    if not (args.fake or args.diff_only):
-        print("Real model reviews arrive in Stage 3. Use --fake for now.", file=sys.stderr)
+    if not (args.fake or args.diff_only or settings.anthropic_api_key):
+        print("ANTHROPIC_API_KEY is not set (add it to .env), or use --fake.", file=sys.stderr)
         return 2
+    factory = demo_fake_factory() if args.fake else real_model_factory(settings)
 
     try:
         with GitHubClient(settings.github_token, settings.github_api_url) as gh:
             if args.diff_only:
                 print_diff(gh, settings, args.repo, args.pr)
                 return 0
-            graph = build_graph(settings, demo_fake_factory(), github=gh, dry_run=args.dry_run)
+            graph = build_graph(settings, factory, github=gh, dry_run=args.dry_run)
             result = run_review(graph, args.repo, args.pr)
     except httpx.HTTPStatusError as exc:
         print(f"GitHub API error: {exc.response.status_code} {exc.request.url}", file=sys.stderr)

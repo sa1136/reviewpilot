@@ -1,26 +1,33 @@
-"""Judge node and retry routing. The judge prompt is a placeholder until Stage 4."""
+"""Judge node and retry routing."""
 
-import time
-
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 from langgraph.types import Send
 
+from reviewpilot.agents import cached_system, untrusted_pr_block
 from reviewpilot.config import MAX_LOOPS_CAP, Settings
+from reviewpilot.llm import call_model
 from reviewpilot.models import SEVERITY_ORDER, Finding
-
-JUDGE_PROMPT = (
-    "You are the judge. For each finding, decide confirm, reject or downgrade. "
-    "Prefer rejecting when unsure. (Placeholder, Stage 4.)"
-)
+from reviewpilot.prompts import load_prompt
 
 
-def build_judge_messages(candidates: list[Finding]) -> list:
-    lines = [
+def format_findings(candidates: list[Finding]) -> str:
+    return "\n".join(
         f"- id={f.id} agent={f.agent} {f.file}:{f.line} [{f.severity}] {f.title}\n"
         f"  evidence: {f.evidence}\n  {f.body}"
         for f in candidates
-    ]
-    return [SystemMessage(JUDGE_PROMPT), HumanMessage("Findings:\n" + "\n".join(lines))]
+    )
+
+
+def build_judge_messages(state: dict, candidates: list[Finding]) -> list:
+    text = "\n\n".join(
+        [
+            untrusted_pr_block(state),
+            f"Agents that ran this round: {', '.join(state['route'])}",
+            "<findings>\n" + format_findings(candidates) + "\n</findings>",
+            "Decide every finding id above.",
+        ]
+    )
+    return [cached_system(load_prompt("judge")), HumanMessage(text)]
 
 
 def _one_level_lower(severity: str) -> str:
@@ -28,7 +35,7 @@ def _one_level_lower(severity: str) -> str:
     return SEVERITY_ORDER[min(i + 1, len(SEVERITY_ORDER) - 1)]
 
 
-def make_judge_node(model, reviewers: list[str]):
+def make_judge_node(model, model_name: str):
     def judge(state: dict) -> dict:
         rnd = state["round"]
         candidates = state["candidates"]
@@ -36,11 +43,16 @@ def make_judge_node(model, reviewers: list[str]):
         if not candidates:
             return done
 
-        start = time.perf_counter()
         try:
-            verdict = model.invoke(build_judge_messages(candidates))
+            result = call_model(
+                model, build_judge_messages(state, candidates), "judge", rnd, model_name
+            )
         except Exception as exc:  # judge failed: nothing from this round is accepted
             return {**done, "errors": [{"node": "judge", "round": rnd, "error": repr(exc)}]}
+        if result.error:
+            error = {"node": "judge", "round": rnd, "error": result.error}
+            return {**done, "errors": [error], "usage": [result.usage]}
+        verdict = result.parsed
 
         # Findings the judge did not decide on are dropped (the judge favors dropping).
         pending = {f.id: f for f in candidates}
@@ -54,13 +66,13 @@ def make_judge_node(model, reviewers: list[str]):
                 finding = finding.model_copy(update={"severity": severity})
             accepted.append(finding)
 
-        retry = [a for a in dict.fromkeys(verdict.retry_agents) if a in reviewers]
-        usage = {"node": "judge", "round": rnd, "latency_s": round(time.perf_counter() - start, 3)}
+        retry = [a for a in dict.fromkeys(verdict.retry_agents) if a in state["route"]]
+        usage = {**result.usage, "judged": len(candidates), "accepted": len(accepted)}
         return {
             "accepted": accepted,
             "round": rnd + 1,
             "retry_agents": retry,
-            "judge_feedback": {a: verdict.feedback.get(a, "") for a in retry},
+            "judge_feedback": {a: verdict.feedback_for(a) for a in retry},
             "usage": [usage],
         }
 

@@ -1,28 +1,47 @@
-"""Model factory. Every LLM call goes through a model built here, so tests can swap in a fake.
+"""Model factory and the single place model calls happen.
 
-A model is anything with `invoke(messages) -> pydantic object` (AgentOutput or JudgeVerdict).
+A model is anything with `invoke(messages)`. The real one (ChatAnthropic with structured output
+and include_raw) returns {"raw": AIMessage, "parsed": obj | None, "parsing_error": ...}. FakeModel
+returns either that same dict or the parsed object directly, so tests need no API.
 """
 
 import re
+import time
 from collections.abc import Callable
-from typing import Any, Literal
+from dataclasses import dataclass
+from typing import Any
 
-from reviewpilot.config import Settings
-from reviewpilot.models import AgentOutput, Finding, FindingDecision, JudgeVerdict
+from reviewpilot.config import AVAILABLE_AGENTS, Settings, estimate_cost
+from reviewpilot.models import (
+    AgentOutput,
+    Finding,
+    FindingDecision,
+    JudgeVerdict,
+)
 
-Role = Literal["quality", "correctness", "judge"]
 ModelFactory = Callable[[str], Any]
 
-SCHEMAS = {"quality": AgentOutput, "correctness": AgentOutput, "judge": JudgeVerdict}
+
+def schema_for(role: str) -> type:
+    return JudgeVerdict if role == "judge" else AgentOutput
 
 
 def get_model(role: str, settings: Settings):
-    """Real Claude model with structured output for the given role."""
+    """Real Claude model for a role (an agent name or "judge").
+
+    No temperature: current Claude models reject non-default sampling values. Structured output
+    uses the API's json_schema output format (forced tool choice is rejected by newer models).
+    """
     from langchain_anthropic import ChatAnthropic
 
-    name = settings.judge_model if role == "judge" else settings.agent_model
-    llm = ChatAnthropic(model=name, api_key=settings.anthropic_api_key, max_tokens=4096)
-    return llm.with_structured_output(SCHEMAS[role])
+    llm = ChatAnthropic(
+        model=settings.model_for(role),
+        api_key=settings.anthropic_api_key,
+        max_tokens=settings.max_output_tokens,
+        default_request_timeout=settings.request_timeout_s,
+        max_retries=settings.api_max_retries,  # 429 / 5xx / network; not the judge loop
+    )
+    return llm.with_structured_output(schema_for(role), method="json_schema", include_raw=True)
 
 
 def real_model_factory(settings: Settings) -> ModelFactory:
@@ -30,6 +49,66 @@ def real_model_factory(settings: Settings) -> ModelFactory:
         return get_model(role, settings)
 
     return factory
+
+
+@dataclass
+class CallResult:
+    parsed: Any  # AgentOutput / JudgeVerdict, or None when the output could not be used
+    usage: dict
+    error: str | None = None
+
+
+def usage_entry(node: str, rnd: int, model: str, raw: Any, latency_ms: int) -> dict:
+    meta = getattr(raw, "usage_metadata", None) or {}
+    details = meta.get("input_token_details") or {}
+    input_tokens = meta.get("input_tokens", 0) or 0  # full prompt, cached tokens included
+    output_tokens = meta.get("output_tokens", 0) or 0
+    cache_read = details.get("cache_read") or 0
+    cache_write = (details.get("cache_creation") or 0) + (
+        details.get("ephemeral_5m_input_tokens") or 0
+    )
+    return {
+        "node": node,
+        "round": rnd,
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
+        "latency_ms": latency_ms,
+        "cost_usd": estimate_cost(model, input_tokens, output_tokens, cache_read, cache_write),
+    }
+
+
+def call_model(model: Any, messages: list, node: str, rnd: int, model_name: str) -> CallResult:
+    """Invoke a model once and record usage. Exceptions propagate; unusable output is reported
+    as an error with usage still recorded (the tokens were spent)."""
+    start = time.perf_counter()
+    result = model.invoke(messages)
+    latency_ms = round((time.perf_counter() - start) * 1000)
+
+    if isinstance(result, dict) and "raw" in result:
+        usage = usage_entry(node, rnd, model_name, result["raw"], latency_ms)
+        if result.get("parsed") is None:
+            reason = result.get("parsing_error") or "no structured output"
+            stop = getattr(result["raw"], "response_metadata", {}).get("stop_reason")
+            note = f" (stop_reason={stop})" if stop else ""
+            return CallResult(None, usage, f"unusable model output{note}: {reason}")
+        return CallResult(result["parsed"], usage)
+    return CallResult(result, usage_entry(node, rnd, model_name, None, latency_ms))
+
+
+def run_totals(usage: list[dict]) -> dict:
+    tokens_in = sum(u.get("input_tokens", 0) for u in usage)
+    tokens_out = sum(u.get("output_tokens", 0) for u in usage)
+    costs = [u.get("cost_usd") for u in usage if "model" in u]
+    known = [c for c in costs if c is not None]
+    return {
+        "input_tokens": tokens_in,
+        "output_tokens": tokens_out,
+        "cost_usd": sum(known),
+        "cost_complete": len(known) == len(costs),  # False if a model is missing from PRICING
+    }
 
 
 class FakeModel:
@@ -78,19 +157,19 @@ def _added_lines_in_prompt(messages: list) -> list[tuple[str, int, str]]:
     return out
 
 
-def _demo_agent(role: str, pick_last: bool) -> Callable[[list], AgentOutput]:
+def _demo_agent(role: str, index: int) -> Callable[[list], AgentOutput]:
     def respond(messages: list) -> AgentOutput:
         added = _added_lines_in_prompt(messages)
         if not added:
             return AgentOutput(notes="no added lines")
-        file, line, code = added[-1] if pick_last else added[0]
+        file, line, code = added[min(index, len(added) - 1)]
         finding = Finding(
             file=file,
             line=line,
             severity="minor",
             category="demo",
             title=f"Demo {role} finding",
-            body="Placeholder finding from the fake model; real reviews arrive in Stage 3.",
+            body="Placeholder finding from the fake model.",
             evidence=code.strip(),
             confidence=0.9,
         )
@@ -107,10 +186,6 @@ def _demo_judge(messages: list) -> JudgeVerdict:
 
 
 def demo_fake_factory() -> ModelFactory:
-    return fake_factory(
-        {
-            "quality": FakeModel(_demo_agent("quality", pick_last=False)),
-            "correctness": FakeModel(_demo_agent("correctness", pick_last=True)),
-            "judge": FakeModel(_demo_judge),
-        }
-    )
+    models = {name: FakeModel(_demo_agent(name, i)) for i, name in enumerate(AVAILABLE_AGENTS)}
+    models["judge"] = FakeModel(_demo_judge)
+    return fake_factory(models)
