@@ -116,6 +116,11 @@ class Settings:
 
     skip_globs: tuple[str, ...] = field(default=DEFAULT_SKIP_GLOBS)
 
+    # Where review state is saved between the review and approval steps.
+    checkpointer: str = "sqlite"  # sqlite | postgres
+    checkpoint_db: str = ".reviewpilot/checkpoints.db"
+    database_url: str | None = None  # for postgres
+
     # API client behavior. These retries are for 429 / 5xx / network errors and are separate
     # from the judge's retry loop.
     max_output_tokens: int = 16000
@@ -150,4 +155,7 @@ class Settings:
             max_comments=_int("REVIEWPILOT_MAX_COMMENTS", 20),
             agent_model=os.getenv("REVIEWPILOT_AGENT_MODEL", "claude-sonnet-5-5"),
             judge_model=os.getenv("REVIEWPILOT_JUDGE_MODEL", "claude-haiku-5-5"),
+            checkpointer=os.getenv("REVIEWPILOT_CHECKPOINTER", "sqlite"),
+            checkpoint_db=os.getenv("REVIEWPILOT_CHECKPOINT_DB", ".reviewpilot/checkpoints.db"),
+            database_url=os.getenv("DATABASE_URL") or None,
         )

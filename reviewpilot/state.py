@@ -39,11 +39,24 @@ class ReviewState(TypedDict):
     overflow: list[Finding]  # post_review: over the max_comments budget, summary only
     untested: list[Finding]  # post_review: missing test findings, one summary line
     posted: dict | None  # post_review: what was written to GitHub (None in a dry run)
+
+    # Human approval (Stage 6).
+    thread_id: str  # owner/repo#pr@head_sha (plus ~fresh-... for --fresh)
+    fresh: bool  # --fresh: post even if this commit was already posted
+    fake: bool  # reviewed with --fake: never posted
+    human_decisions: dict[str, dict]  # item id -> {"action", "body"}, saved across pauses
+    decisions_log: list[dict]  # every item's final action, with source human or default
+    review_stats: dict  # counts: approve, reject, edit, promote, total, by_human
+    approved_possible: list[dict]  # possible issues the human approved for the summary
+    tests_line: str | None  # approved (or edited) "New functions without tests" line
     status: str  # success | partial | failed
     started_at: float  # time.time() when the run began, for the footer
+    reviewed_at: float | None  # set by the judge; review time excludes waiting for a human
 
 
-def initial_state(repo: str, pr_number: int) -> ReviewState:
+def initial_state(
+    repo: str, pr_number: int, thread_id: str = "", fresh: bool = False
+) -> ReviewState:
     return ReviewState(
         repo=repo,
         pr_number=pr_number,
@@ -71,6 +84,15 @@ def initial_state(repo: str, pr_number: int) -> ReviewState:
         overflow=[],
         untested=[],
         posted=None,
+        thread_id=thread_id,
+        fresh=fresh,
+        fake=False,
+        human_decisions={},
+        decisions_log=[],
+        review_stats={},
+        approved_possible=[],
+        tests_line=None,
         status="",
         started_at=time.time(),
+        reviewed_at=None,
     )

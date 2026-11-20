@@ -148,6 +148,34 @@ The checkpointer is what lets the graph stop at approval and pick up later, even
   `GITHUB_TOKEN` (prints the needed permissions: Pull requests read and write on the target repo)
   and cannot be combined with `--dry-run`, `--fake` or `--diff-only`. Comments are posted as the
   token's user until the Stage 10 GitHub App.
+- **Human approval** (`approval.py`): judge -> approval -> post_review. The approval node calls
+  `interrupt()` with pending items under short stable ids, in a fixed order computed from saved
+  state: `i` inline (default approve), `m` over the comment budget (approve), `p` possible issues
+  (default not posted; approve = summary list, promote = inline), `n` nits (approve), `t1` the new
+  functions without tests line (approve). Resume with
+  `Command(resume={"decisions": [{"id", "action", "body"}], "post": bool})`; actions approve,
+  reject, edit (body replaces the text, original kept in `decisions_log`), promote. `post=False`
+  saves decisions in `human_decisions` and pauses again (preview of what would be posted).
+  `post=True` writes `decisions_log` and `review_stats` (approve, reject, edit, promote counts,
+  total, by_human: approval and edit rates for LangSmith) and post_review posts only what was
+  approved, edited or promoted. `approve --approve all` approves everything except possible
+  issues, which need an explicit approve or promote.
+- **Checkpointer** (`checkpoint.py`): SqliteSaver at `.reviewpilot/checkpoints.db` (gitignored)
+  by default; PostgresSaver when `REVIEWPILOT_CHECKPOINTER=postgres` and `DATABASE_URL` (install
+  with `uv sync --extra postgres`; wired, not tested yet). Our model types are registered in the
+  serializer (`allowed_msgpack_modules`). thread_id = `owner/repo#pr@head_sha`; `--fresh` makes
+  `...@sha~fresh-<timestamp>` and posts even if the commit was already posted. Models are created
+  lazily (`graph.LazyModel`), so resuming at approval needs no model credentials.
+- **Rerun rules** (`cli.start_review`): a thread waiting for approval is shown again, not
+  re-reviewed; an interrupted thread resumes from its last checkpoint (agents are not rerun); a
+  finished thread prints "already posted for <sha>" and exits. That check does one GitHub read
+  (the PR's head sha, needed to pick the thread) and never writes.
+- **SHA marker in the sticky summary** too (`<!-- reviewpilot:sha=SHA -->`): `post_review`
+  writes nothing if the commit's marker is in a review or in the summary, unless forced by
+  `--fresh`. Replaces the Stage 5 "skip review, update summary" behavior, so the summary can no
+  longer drift from the inline comments.
+- **Footer time** is frozen when the judge finishes (`reviewed_at`), so it excludes the time a
+  review waits for a human.
 - **Repo location:** `~/code/reviewpilot` (outside iCloud). The sandbox clone is at
   `~/code/reviewpilot-sandbox`.
 - **Holdout discipline:** PR #2 (`evals/planted/pr2.md`) is never used for tuning. Tune on PR #1.
@@ -199,7 +227,8 @@ reviewpilot/                # the engine (Python)
   agents.py   sub agent nodes
   validate.py deterministic checks: added line, evidence, lane, missing test, repeats, dedupe
   judge.py    judge node and retry routing with the hard cap
-  approval.py interrupt() and resume                                    (Stage 6)
+  approval.py human approval: pending items, interrupt(), decisions, stats
+  checkpoint.py SQLite / Postgres checkpointer, thread ids, thread listing
   output.py   comment plan (inline / nits / overflow) and the summary text
   graph.py    StateGraph wiring, fetch_pr, router node, post_review
   cli.py      python -m reviewpilot --repo o/r --pr 12 --dry-run
@@ -231,7 +260,8 @@ docs/         action plans
   summary found by a hidden marker. Done: reviews posted to sandbox PR #1 and #2 with comments on
   the right lines; a second `--post` on PR #1 skipped the review and only updated the summary.
   Also: severity floor, possible issues, missing tests as one summary line.
-- [ ] **Stage 6. Human approval and persistence** — `interrupt()` before post_review with the
+- [ ] **Stage 6. Human approval and persistence** *(code and tests done; the real post on
+  sandbox PR #3 waits for a fine grained GITHUB_TOKEN in .env)* — `interrupt()` before post_review with the
   pending comments as payload; resume with `Command(resume=...)` holding approve / edit / reject
   per comment; SqliteSaver for dev, PostgresSaver behind an env flag; thread_id `repo#pr@sha`; CLI
   approval mode. Done when: stop at approval, restart, resume and post.
@@ -264,8 +294,14 @@ uv sync                                            # install
 uv run pytest                                      # tests (live test skipped)
 RUN_LIVE=1 uv run pytest -m live                   # one real API call, costs a little
 uv run ruff check . && uv run ruff format --check .
-uv run python -m reviewpilot --repo owner/name --pr 12              # real review, printed (dry run)
-uv run python -m reviewpilot --repo owner/name --pr 12 --post       # real review, posted to the PR
-uv run python -m reviewpilot --repo owner/name --pr 12 --fake       # full graph, fake model
-uv run python -m reviewpilot --repo owner/name --pr 12 --diff-only  # numbered diff only
+uv run python -m reviewpilot review --repo owner/name --pr 12      # review, stop at approval
+uv run python -m reviewpilot pending                                # reviews waiting for approval
+uv run python -m reviewpilot approve --repo owner/name --pr 12 --reject i3 --edit i2="text" \
+    --promote p1                                                    # save decisions, preview
+uv run python -m reviewpilot approve --repo owner/name --pr 12 --post   # post what was approved
+uv run python -m reviewpilot approve --repo owner/name --pr 12 -i   # decide item by item
+uv run python -m reviewpilot review --repo owner/name --pr 12 --auto-approve  # Action mode
+uv run python -m reviewpilot review --repo owner/name --pr 12 --fresh         # new thread
+uv run python -m reviewpilot review --repo owner/name --pr 12 --fake          # fake model
+uv run python -m reviewpilot review --repo owner/name --pr 12 --diff-only     # numbered diff
 ```

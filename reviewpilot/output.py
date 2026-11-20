@@ -5,7 +5,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from reviewpilot.config import PRICING_CHECKED, Settings
-from reviewpilot.github import SUMMARY_MARKER
+from reviewpilot.github import SUMMARY_MARKER, sha_marker
 from reviewpilot.llm import run_totals
 from reviewpilot.models import SEVERITY_ORDER, Finding
 from reviewpilot.validate import DEF_NAME
@@ -17,10 +17,22 @@ class CommentPlan:
     nits: list[Finding]  # below min_inline_severity: listed in the summary only
     overflow: list[Finding]  # inline worthy but over the max_comments budget: summary only
     untested: list[Finding] = field(default_factory=list)  # missing_test: one summary line
+    tests_line: str | None = None  # after approval: the approved (or edited) tests line
 
     @property
     def shown(self) -> list[Finding]:
         return self.inline + self.overflow + self.nits + self.untested
+
+
+def compute_status(errors: list[dict], agents: list[str]) -> str:
+    """Never "success" if anything failed. Judge failure, or every routed agent failing on the
+    first pass, means nothing trustworthy was produced."""
+    if any(e["node"] == "judge" for e in errors):
+        return "failed"
+    failed_first_pass = {e["node"] for e in errors if e["round"] == 1}
+    if agents and set(agents) <= failed_first_pass:
+        return "failed"
+    return "partial" if errors else "success"
 
 
 def severity_rank(f: Finding) -> int:
@@ -74,18 +86,34 @@ def inline_preview(plan: CommentPlan) -> str:
     return "\n".join(out)
 
 
-def format_summary(state: dict, plan: CommentPlan, status: str) -> str:
-    """Markdown for the sticky summary comment (also printed in a dry run)."""
+def format_summary(
+    state: dict,
+    plan: CommentPlan,
+    status: str,
+    possible: list[dict] | None = None,
+    stats: dict | None = None,
+) -> str:
+    """Markdown for the sticky summary comment. `possible` are the possible issues to show
+    (default: all in state); `stats` are the human approval counts, when known."""
     errors = state["errors"]
     shown = plan.shown
-    possible = state.get("possible_issues", []) if status != "failed" else []
-    sha = (state.get("head_sha") or "")[:7] or "unknown"
+    if possible is None:
+        possible = state.get("possible_issues", [])
+    if status == "failed":
+        possible = []
+    sha = state.get("head_sha") or ""
     out = [
         SUMMARY_MARKER,
-        f"## ReviewPilot review of `{sha}`",
+        sha_marker(sha),
+        f"## ReviewPilot review of `{sha[:7] or 'unknown'}`",
         "",
         f"**Status:** {status} · {len(shown)} findings · {len(plan.inline)} inline comments",
     ]
+    if stats and stats.get("total"):
+        out.append(
+            f"**Human review:** {stats['approve']} approved, {stats['edit']} edited, "
+            f"{stats['promote']} promoted, {stats['reject']} rejected"
+        )
     if status == "failed":
         out.append("\nThe review failed, so no findings are reported as confirmed.")
     elif not state["route"]:
@@ -125,9 +153,10 @@ def format_summary(state: dict, plan: CommentPlan, status: str) -> str:
         out.append("\n### Nits")
         out.extend(f"- `{f.file}:{f.line}` {f.title}" for f in plan.nits)
 
-    if plan.untested:
+    tests = plan.tests_line or (untested_line(plan.untested) if plan.untested else None)
+    if tests:
         out.append("\n### Tests")
-        out.append(untested_line(plan.untested))
+        out.append(tests)
 
     if state["skipped"]:
         out.append("\n### Skipped files")
@@ -147,7 +176,7 @@ def footer(state: dict) -> str:
     confirmed = sum(u.get("accepted", 0) for u in state["usage"])
     totals = run_totals(state["usage"])
     cost = f"${totals['cost_usd']:.4f}" + ("" if totals["cost_complete"] else " (partial)")
-    elapsed = time.time() - state["started_at"]
+    elapsed = (state.get("reviewed_at") or time.time()) - state["started_at"]
     lines = [
         f"Rounds: {max(state['round'] - 1, 0)} · judged {judged}, confirmed {confirmed}, "
         f"rejected {judged - confirmed} · dropped before the judge: {dropped_text}",

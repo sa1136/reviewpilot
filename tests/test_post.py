@@ -97,7 +97,7 @@ def test_review_payload_shape():
     assert "```\nreturn x\n```" in comment["body"]
     assert "```suggestion" not in comment["body"]
     assert result.review_url == "https://gh/review/1"
-    assert not result.skipped_review
+    assert not result.skipped
 
 
 def test_sticky_summary_is_created_then_updated():
@@ -115,20 +115,41 @@ def test_sticky_summary_is_created_then_updated():
     assert api.sent("PATCH", "/comments/77") == [{"body": f"{SUMMARY_MARKER}\nnew"}]
 
 
-def test_same_head_sha_skips_the_review_but_updates_the_summary():
+def writes(api: FakeGitHubAPI) -> list[tuple[str, str]]:
+    return [(m, p) for m, p, _ in api.requests if m != "GET"]
+
+
+def test_same_head_sha_marker_in_a_review_writes_nothing():
     api = FakeGitHubAPI(
         reviews=[{"body": f"{sha_marker(SHA)}\nReviewPilot left 1 inline comment."}],
-        comments=[{"id": 5, "body": f"{SUMMARY_MARKER}\nold"}],
+        comments=[{"id": 5, "body": f"{SUMMARY_MARKER}\nold", "html_url": "https://gh/s"}],
     )
     result = client(api).post_review(REPO, 1, SHA, [f(3)], "new summary")
-    assert result.skipped_review
-    assert api.sent("POST", "/reviews") == []
-    assert len(api.sent("PATCH", "/comments/5")) == 1
+    assert result.skipped and result.summary_url == "https://gh/s"
+    assert writes(api) == []
 
     # a new commit is not skipped
     result = client(api).post_review(REPO, 1, "newsha99", [f(3)], "new summary")
-    assert not result.skipped_review
+    assert not result.skipped
     assert len(api.sent("POST", "/reviews")) == 1
+
+
+def test_sha_marker_in_the_summary_skips_a_run_with_no_inline_comments():
+    summary = f"{SUMMARY_MARKER}\n{sha_marker(SHA)}\nold"
+    api = FakeGitHubAPI(comments=[{"id": 5, "body": summary}])
+    result = client(api).post_review(REPO, 1, SHA, [], "new summary")
+    assert result.skipped
+    assert writes(api) == []
+
+
+def test_force_posts_even_when_already_posted():
+    api = FakeGitHubAPI(
+        reviews=[{"body": sha_marker(SHA)}], comments=[{"id": 5, "body": SUMMARY_MARKER}]
+    )
+    result = client(api).post_review(REPO, 1, SHA, [f(3)], "new summary", force=True)
+    assert not result.skipped
+    assert len(api.sent("POST", "/reviews")) == 1
+    assert len(api.sent("PATCH", "/comments/5")) == 1
 
 
 def test_422_moves_rejected_comment_to_summary_instead_of_failing():
@@ -194,15 +215,17 @@ def test_dry_run_never_writes(capsys):
     assert SUMMARY_MARKER in capsys.readouterr().out
 
 
-def test_post_refuses_without_token(monkeypatch, capsys):
+def test_post_refuses_without_token(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("GITHUB_TOKEN", "")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
-    assert main(["--repo", REPO, "--pr", "1", "--post"]) == 2
+    monkeypatch.setenv("REVIEWPILOT_CHECKPOINT_DB", str(tmp_path / "c.db"))
+    assert main(["review", "--repo", REPO, "--pr", "1", "--auto-approve"]) == 2
     err = capsys.readouterr().err
-    assert "--post needs GITHUB_TOKEN" in err
+    assert "Posting needs GITHUB_TOKEN" in err
     assert "Pull requests: Read and write" in err
 
 
-def test_post_cannot_combine_with_fake(monkeypatch, capsys):
+def test_auto_approve_cannot_combine_with_fake(monkeypatch, tmp_path):
     monkeypatch.setenv("GITHUB_TOKEN", "t")
-    assert main(["--repo", REPO, "--pr", "1", "--post", "--fake"]) == 2
+    monkeypatch.setenv("REVIEWPILOT_CHECKPOINT_DB", str(tmp_path / "c.db"))
+    assert main(["review", "--repo", REPO, "--pr", "1", "--auto-approve", "--fake"]) == 2

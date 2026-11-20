@@ -16,29 +16,23 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY and GITHUB_TOKEN
 
 ## Usage
 
-Review a real PR with Claude and print the result (needs `ANTHROPIC_API_KEY`, nothing posted):
+Review a PR. It stops before posting and saves the review (one per commit):
 
 ```bash
-uv run python -m reviewpilot --repo owner/name --pr 12
+uv run python -m reviewpilot review --repo owner/name --pr 12
 ```
 
-Post it to the PR (needs `GITHUB_TOKEN` with pull requests read and write):
+Decide on each comment, preview, then post (needs `GITHUB_TOKEN` with pull requests read and
+write):
 
 ```bash
-uv run python -m reviewpilot --repo owner/name --pr 12 --post
+uv run python -m reviewpilot pending
+uv run python -m reviewpilot approve --repo owner/name --pr 12 --reject i3 --edit i2="Use >= here."
+uv run python -m reviewpilot approve --repo owner/name --pr 12 --post
 ```
 
-Run the whole review graph with a fake model (no Anthropic key, no cost):
-
-```bash
-uv run python -m reviewpilot --repo owner/name --pr 12 --fake
-```
-
-Print only the numbered diff:
-
-```bash
-uv run python -m reviewpilot --repo owner/name --pr 12 --diff-only
-```
+Other options: `review --fake` (no API key, no cost), `review --diff-only`, `review --fresh`,
+`review --auto-approve` (approve and post in one go), `approve -i` (decide item by item).
 
 ## Development
 

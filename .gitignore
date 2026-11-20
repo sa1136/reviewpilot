@@ -11,6 +11,9 @@ __pycache__/
 build/
 dist/
 
+# Review state (checkpoints)
+.reviewpilot/
+
 # Tooling
 .pytest_cache/
 .ruff_cache/

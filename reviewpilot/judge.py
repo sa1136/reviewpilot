@@ -1,5 +1,7 @@
 """Judge node and retry routing."""
 
+import time
+
 from langchain_core.messages import HumanMessage
 from langgraph.types import Send
 
@@ -58,7 +60,13 @@ def make_judge_node(model, model_name: str):
     def judge(state: dict) -> dict:
         rnd = state["round"]
         candidates = state["candidates"]
-        done = {"round": rnd + 1, "retry_agents": [], "judge_feedback": {}}
+        # reviewed_at freezes the footer's review time before the run waits for a human
+        done = {
+            "round": rnd + 1,
+            "retry_agents": [],
+            "judge_feedback": {},
+            "reviewed_at": time.time(),
+        }
         if not candidates:
             return done
 
@@ -104,6 +112,7 @@ def make_judge_node(model, model_name: str):
             "judged": candidates,
             "possible_issues": possible,
             "round": rnd + 1,
+            "reviewed_at": time.time(),
             "retry_agents": retry,
             "judge_feedback": {a: verdict.feedback_for(a) for a in retry},
             "usage": [usage],
@@ -113,7 +122,7 @@ def make_judge_node(model, model_name: str):
 
 
 def make_router(settings: Settings):
-    """After the judge: fan out again to the agents it sent back, or finish.
+    """After the judge: fan out again to the agents it sent back, or go to human approval.
 
     The cap lives here in code. `round` has already been bumped to the round a retry would be.
     """
@@ -127,6 +136,6 @@ def make_router(settings: Settings):
             and next_round <= MAX_LOOPS_CAP
         ):
             return [Send(agent, state) for agent in state["retry_agents"]]
-        return "post_review"
+        return "approval"
 
     return route_after_judge

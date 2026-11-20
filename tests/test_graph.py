@@ -1,8 +1,10 @@
 """Graph path tests. FakeModel and a fake GitHub only: no network, no real LLM."""
 
+from langgraph.types import Command
+
 from reviewpilot.config import MAX_LOOPS_CAP, Settings
 from reviewpilot.github import PullRequest
-from reviewpilot.graph import RECURSION_LIMIT, build_graph, run_review
+from reviewpilot.graph import build_graph, config_for, run_review
 from reviewpilot.llm import FakeModel, fake_factory
 from reviewpilot.models import (
     LANE_CATEGORIES,
@@ -259,17 +261,19 @@ def test_trace_node_order_for_one_retry():
     models = {"quality": q, "correctness": c, "security": agent_says(), "judge": j}
     graph = build_graph(Settings(), fake_factory(models), FakeGitHub())
 
-    trace = [
-        node
-        for update in graph.stream(
-            initial_state("o/r", 1), {"recursion_limit": RECURSION_LIMIT}, stream_mode="updates"
-        )
-        for node in update
-    ]
+    config = config_for("trace-thread")
 
+    def nodes(stream_input):
+        return [n for update in graph.stream(stream_input, config, stream_mode="updates")
+                for n in update]  # fmt: skip
+
+    trace = nodes(initial_state("o/r", 1))
     assert trace[:2] == ["fetch_pr", "router"]
     assert sorted(trace[2:5]) == ["correctness", "quality", "security"]  # parallel, any order
-    assert trace[5:] == ["validate", "judge", "correctness", "validate", "judge", "post_review"]
+    assert trace[5:] == ["validate", "judge", "correctness", "validate", "judge", "__interrupt__"]
+    assert graph.get_state(config).next == ("approval",)
+
+    assert nodes(Command(resume={"decisions": [], "post": True})) == ["approval", "post_review"]
 
 
 def test_no_reviewable_files_skips_agents():
@@ -447,7 +451,10 @@ def test_rejected_correctness_and_security_become_possible_issues():
             ]  # security finding gets no decision at all
         )
 
-    result = run({"correctness": c, "security": s, "quality": q, "judge": FakeModel(respond)})
+    models = {"correctness": c, "security": s, "quality": q, "judge": FakeModel(respond)}
+    graph = build_graph(Settings(), fake_factory(models), FakeGitHub())
+    # possible issues are not posted unless a human approves (p1) or promotes them
+    result = run_review(graph, "o/r", 1, decisions=[{"id": "p1", "action": "approve"}])
 
     possible = {p["finding"].title: p["reason"] for p in result["possible_issues"]}
     assert possible == {
@@ -458,6 +465,7 @@ def test_rejected_correctness_and_security_become_possible_issues():
     summary = result["summary"]
     assert "### Possible issues (judge was not sure)" in summary
     assert "Divides by zero (correctness). Judge: x is never 0" in summary
+    assert "Token in logs" not in summary  # p2 kept its default: not posted
     assert "Vague name" not in summary  # quality rejects drop silently
 
 
@@ -478,5 +486,5 @@ def test_missing_test_findings_are_one_summary_line_never_inline():
     result = run({"quality": q, "judge": FakeModel(judge())}, Settings(num_agents=2), github)
 
     assert result["inline"] == []
-    assert [f.title for f in result["untested"]] == ["total has no test"]
+    assert result["tests_line"] == "New functions without tests: total"
     assert "### Tests\nNew functions without tests: total" in result["summary"]

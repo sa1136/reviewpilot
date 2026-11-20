@@ -130,7 +130,7 @@ class FakeModel:
             response = self._responses.pop(0)
         else:
             raise RuntimeError("FakeModel ran out of scripted responses")
-        if isinstance(response, Exception):
+        if isinstance(response, BaseException):  # BaseException: tests can simulate a crash
             raise response
         return response
 

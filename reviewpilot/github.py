@@ -25,7 +25,7 @@ def comment_body(f: Finding) -> str:
 
 @dataclass
 class PostResult:
-    skipped_review: bool  # a review for this head commit already existed
+    skipped: bool  # this head commit was already posted, so nothing was written
     review_url: str | None
     summary_url: str
     summary_created: bool  # False when an existing sticky summary was updated
@@ -112,15 +112,26 @@ class GitHubClient:
         head_sha: str,
         inline_findings: list[Finding],
         summary_markdown: str,
+        force: bool = False,
     ) -> PostResult:
-        """Post one review with inline comments for this head commit (skipped if one already
-        exists), then create or update the sticky summary comment."""
+        """Post one review with inline comments for this head commit, then create or update the
+        sticky summary comment. If this commit was already posted (its sha marker is in a review
+        or in the sticky summary), nothing is written, unless `force` (a --fresh review)."""
         marker = sha_marker(head_sha)
         reviews = self._paginate(f"/repos/{repo}/pulls/{number}/reviews")
-        skipped = any(marker in (r.get("body") or "") for r in reviews)
+        comments = self._paginate(f"/repos/{repo}/issues/{number}/comments")
+        summary_comment = next(
+            (c for c in comments if SUMMARY_MARKER in (c.get("body") or "")), None
+        )
+        already = any(marker in (r.get("body") or "") for r in reviews) or (
+            summary_comment is not None and marker in summary_comment["body"]
+        )
+        if already and not force:
+            url = summary_comment.get("html_url", "") if summary_comment else ""
+            return PostResult(True, None, url, False)
 
         review_url, posted, moved = None, [], []
-        if not skipped and inline_findings:
+        if inline_findings:
             review_url, posted, moved = self._create_review(
                 repo, number, head_sha, inline_findings, marker
             )
@@ -132,8 +143,8 @@ class GitHubClient:
             summary += "\n\n### Could not be posted inline\n" + "\n".join(
                 f"- `{f.severity}` `{f.file}:{f.line}` {f.title} ({f.agent})" for f in moved
             )
-        summary_url, created = self._upsert_summary(repo, number, summary)
-        return PostResult(skipped, review_url, summary_url, created, posted, moved)
+        summary_url, created = self._upsert_summary(repo, number, summary, summary_comment)
+        return PostResult(False, review_url, summary_url, created, posted, moved)
 
     def _create_review(self, repo, number, head_sha, findings, marker):
         """One review with all comments. If GitHub rejects it (422), post the review body alone
@@ -169,9 +180,7 @@ class GitHubClient:
             posted.append(f)
         return review_url, posted, moved
 
-    def _upsert_summary(self, repo: str, number: int, body: str) -> tuple[str, bool]:
-        comments = self._paginate(f"/repos/{repo}/issues/{number}/comments")
-        existing = next((c for c in comments if SUMMARY_MARKER in (c.get("body") or "")), None)
+    def _upsert_summary(self, repo: str, number: int, body: str, existing) -> tuple[str, bool]:
         if existing:
             resp = self._http.patch(
                 f"/repos/{repo}/issues/comments/{existing['id']}", json={"body": body}
