@@ -99,8 +99,11 @@ The checkpointer is what lets the graph stop at approval and pick up later, even
   platform.claude.com/docs/en/about-claude/pricing) includes Haiku 5.5's higher price tier for
   prompts over 100k tokens. Unparseable output is an error, but its usage is still recorded.
 - **Prompt caching:** system prompts carry `cache_control: ephemeral` (langchain-anthropic passes
-  it through cleanly). Haiku 5.5 / Sonnet 5.5 cache prefixes of 512+ tokens; our system prompts
-  are around that size, so check `cache_read_tokens` in usage to confirm hits.
+  it through cleanly). Confirmed working on Haiku 5.5: the first run wrote 6,337 tokens, later
+  runs within 5 minutes read 6k to 12k cached tokens. The footer shows cache read / written.
+- **Stage 4 inputs from the Stage 3 baseline:** retries mostly produced repeats of already
+  accepted findings (dedupe against `accepted`), quality repeated correctness's bug (lane check
+  or cross agent dedupe), and correctness never flagged the uncapped discount on cart.py 68.
 - **Dry run output:** route and reasons, then findings grouped by file, then a footer with status,
   rounds, judged / confirmed / rejected counts, tokens, estimated cost and total time.
 - **Inline comments go on added lines only** (`FileDiff.added_lines`). A finding on an unchanged
@@ -160,11 +163,11 @@ docs/         action plans
 - [x] **Stage 0. Setup** — repo, uv, ruff, pytest, CI.
 - [x] **Stage 1. GitHub client and diff parsing.**
 - [x] **Stage 2. LangGraph skeleton**, fake model, judge loop wiring.
-- [ ] **Stage 3. Router plus 3 real Claude sub agents and prompts** — prompts as files; router
+- [x] **Stage 3. Router plus 3 real Claude sub agents and prompts** — prompts as files; router
   picks agents from changed files; real Claude calls with structured output, usage and cost
-  logging; planted bug PR #1 in the sandbox and a first dry run. Done when: a table of planted bugs
-  caught, false positives, and cost per run. *Status: code, tests and PR #1 done; real dry run
-  waiting for `ANTHROPIC_API_KEY` in `.env`.*
+  logging; planted bug PR #1 in the sandbox and a first dry run. Done: baseline of 3 runs in
+  `evals/planted/pr1.md` (4 of 6 bugs caught every run, discount over 100% never raised,
+  0 to 3 false positives, $0.004 to $0.007 and 17 to 43 s per run on Haiku 5.5).
 - [ ] **Stage 4. Validate, judge and the loop** — drop findings not on an added line or with
   evidence not in the code; dedupe across rounds and against accepted; judge prompt tuned on PR #1;
   retry only the agents that were mostly wrong. Done when: fewer false positives on PR #1 than

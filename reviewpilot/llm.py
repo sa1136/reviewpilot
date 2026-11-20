@@ -106,6 +106,8 @@ def run_totals(usage: list[dict]) -> dict:
     return {
         "input_tokens": tokens_in,
         "output_tokens": tokens_out,
+        "cache_read_tokens": sum(u.get("cache_read_tokens", 0) for u in usage),
+        "cache_write_tokens": sum(u.get("cache_write_tokens", 0) for u in usage),
         "cost_usd": sum(known),
         "cost_complete": len(known) == len(costs),  # False if a model is missing from PRICING
     }

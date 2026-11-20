@@ -93,6 +93,8 @@ def test_run_totals():
     assert run_totals(usage) == {
         "input_tokens": 15,
         "output_tokens": 3,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
         "cost_usd": 0.75,
         "cost_complete": True,
     }

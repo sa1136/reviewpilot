@@ -34,3 +34,31 @@ Notes:
 | Tests for both of the above | tests/test_users.py | 1-13 |
 
 Any finding on these lines is a false positive. `connect()` (users.py 8-9) is also unremarkable.
+
+## Stage 3 baseline (2026-11-20)
+
+Three real dry runs, all roles on `claude-haiku-5-5`, `max_retries=2`, no Stage 4 validation yet.
+"Shown" = confirmed or downgraded by the judge and printed in the summary.
+
+| # | Issue | Run 1 | Run 2 | Run 3 | Shown in |
+|---|---|---|---|---|---|
+| 1 | Discount can exceed 100% (cart.py 68) | missed | missed | missed | 0 / 3, never raised by any agent |
+| 2 | Off by one slice (cart.py 75) | correctness, 75, critical | correctness, 75, major | correctness, 75, major | 3 / 3 |
+| 3 | Empty list `items[0]` (cart.py 80) | correctness, 80, major | correctness, 80, major | correctness, 80, minor | 3 / 3 |
+| 4 | SQL injection (users.py 18) | security, 18, critical | security, 18, critical | security, 18, critical | 3 / 3 |
+| 5 | Hardcoded password (users.py 5) | security, 5, critical | security, 5, critical | security, 5, critical | 3 / 3 |
+| 6 | `deactivate_user` untested (users.py 26) | quality, 26, minor | raised at line 17, rejected | raised at 26, rejected | 1 / 3 |
+
+False positives (comments on the clean lines): run 1: 0, run 2: 1, run 3: 3. All of them were
+"cart test lives in tests/test_users.py" on tests/test_users.py line 9; in run 3 the same comment
+was accepted again in rounds 1, 2 and 3.
+
+Other shown comments not in the key: quality's "is_admin name is misleading" (users.py 22, all 3
+runs); quality repeating correctness's empty list bug at cart.py 80 (runs 1 and 3, out of lane);
+the same member_total missing test comment in rounds 1 and 2 of run 1 (cross round duplicate).
+
+| Run | Rounds | Judged | Confirmed | Rejected | Tokens in / out | Cache read / written | Cost | Time |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 2 | 14 | 10 | 4 | 20,914 / 7,680 | 2,886 / 6,337 | $0.0058 | 29.4 s |
+| 2 | 1 | 11 | 7 | 4 | 14,216 / 5,530 | 6,337 / 0 | $0.0036 | 16.7 s |
+| 3 | 3 | 20 | 13 | 7 | 27,936 / 10,339 | 12,109 / 0 | $0.0069 | 42.8 s |

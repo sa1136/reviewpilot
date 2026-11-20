@@ -82,7 +82,8 @@ def format_summary(state: dict, accepted: list[Finding], status: str) -> str:
         f"Judged: {judged} | confirmed: {confirmed} | rejected: {judged - confirmed} | "
         f"shown: {len(accepted)}",
         f"Tokens: {totals['input_tokens']:,} in / {totals['output_tokens']:,} out | "
-        f"est. cost: {cost} (prices checked {PRICING_CHECKED}) | time: {elapsed:.1f}s",
+        f"cache: {totals['cache_read_tokens']:,} read / {totals['cache_write_tokens']:,} written",
+        f"Est. cost: {cost} (prices checked {PRICING_CHECKED}) | time: {elapsed:.1f}s",
     ]
     return "\n".join(out)
 
