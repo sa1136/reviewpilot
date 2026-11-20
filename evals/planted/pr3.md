@@ -30,3 +30,12 @@ positive.
 
 Comments on the module docstring or `FREE_SHIPPING_MIN` (orders.py 1-3) also count as false
 positives. Weak test comments (for example, no test for an empty list) are not counted either way.
+
+## Stage 6 run (2026-11-20), all Haiku 5.5
+
+All 3 planted issues were found: orders.py 13 (division by zero), 18 (`>` boundary) and 23
+(`eval`), each critical after the severity floor. One false positive, "format_price produces
+malformed output for negative amounts" on the clean orders.py 8, was rejected by the human at
+approval. Quality also flagged a weak free shipping test (tests/test_orders.py 14), which is not
+counted either way. Human review: 3 approved, 1 edited (line 18), 0 promoted, 1 rejected.
+Posted review: 4 inline comments; a second `review` printed "already posted" and wrote nothing.

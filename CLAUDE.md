@@ -260,11 +260,11 @@ docs/         action plans
   summary found by a hidden marker. Done: reviews posted to sandbox PR #1 and #2 with comments on
   the right lines; a second `--post` on PR #1 skipped the review and only updated the summary.
   Also: severity floor, possible issues, missing tests as one summary line.
-- [ ] **Stage 6. Human approval and persistence** *(code and tests done; the real post on
-  sandbox PR #3 waits for a fine grained GITHUB_TOKEN in .env)* — `interrupt()` before post_review with the
+- [x] **Stage 6. Human approval and persistence** — `interrupt()` before post_review with the
   pending comments as payload; resume with `Command(resume=...)` holding approve / edit / reject
   per comment; SqliteSaver for dev, PostgresSaver behind an env flag; thread_id `repo#pr@sha`; CLI
-  approval mode. Done when: stop at approval, restart, resume and post.
+  approval mode. Done: sandbox PR #3 reviewed in one process, approved (1 reject, 1 edit) and
+  posted from new processes; reviewing it again printed "already posted" and wrote nothing.
 - [ ] **Stage 7. FastAPI backend** — `POST /reviews` starts a run, `GET /reviews/{id}/events`
   streams graph updates over SSE, GET pending comments, POST decisions to resume, review history.
   Done when: a curl session can start, watch, approve and post a review.
