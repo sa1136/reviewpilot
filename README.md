@@ -16,10 +16,16 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY and GITHUB_TOKEN
 
 ## Usage
 
-Print the numbered diff of a PR (no posting yet):
+Run the whole review graph on a real PR with a fake model (no Anthropic key, nothing posted):
 
 ```bash
-uv run python -m reviewpilot --repo owner/name --pr 12 --dry-run
+uv run python -m reviewpilot --repo owner/name --pr 12 --dry-run --fake
+```
+
+Print only the numbered diff:
+
+```bash
+uv run python -m reviewpilot --repo owner/name --pr 12 --diff-only
 ```
 
 ## Development

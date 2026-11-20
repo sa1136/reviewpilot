@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import PurePosixPath
 
+from reviewpilot.models import FileDiff, SkippedFile
+
 HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 
 
@@ -20,24 +22,6 @@ class Hunk:
     new_start: int
     new_count: int
     lines: list[str] = field(default_factory=list)  # raw body lines, prefix included
-
-
-@dataclass
-class FileDiff:
-    path: str
-    status: str  # added | modified | removed | renamed | ...
-    patch: str
-    numbered_patch: str
-    valid_lines: set[int]  # new side lines a review comment may target (added + context)
-    added_lines: set[int]  # new side lines that were added in this PR
-    previous_path: str | None = None
-    truncated: bool = False
-
-
-@dataclass(frozen=True)
-class SkippedFile:
-    path: str
-    reason: str
 
 
 def parse_hunks(patch: str) -> list[Hunk]:
@@ -126,21 +110,23 @@ def build_file_diffs(
         patch = f.get("patch")
 
         if should_skip(path, skip_globs):
-            skipped.append(SkippedFile(path, "matches skip rules"))
+            skipped.append(SkippedFile(path=path, reason="matches skip rules"))
             continue
         if status == "removed":
-            skipped.append(SkippedFile(path, "file removed"))
+            skipped.append(SkippedFile(path=path, reason="file removed"))
             continue
         if not patch:
-            skipped.append(SkippedFile(path, "no patch (binary, too large, or pure rename)"))
+            skipped.append(
+                SkippedFile(path=path, reason="no patch (binary, too large, or pure rename)")
+            )
             continue
         if len(diffs) >= max_files:
-            skipped.append(SkippedFile(path, f"over the {max_files} file limit"))
+            skipped.append(SkippedFile(path=path, reason=f"over the {max_files} file limit"))
             continue
 
         hunks, truncated = _fit_hunks(parse_hunks(patch), max_patch_chars)
         if not hunks:
-            skipped.append(SkippedFile(path, f"patch over {max_patch_chars} chars"))
+            skipped.append(SkippedFile(path=path, reason=f"patch over {max_patch_chars} chars"))
             continue
 
         numbered, valid, added = number_hunks(hunks)

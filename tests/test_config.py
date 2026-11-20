@@ -9,8 +9,10 @@ def test_defaults():
 
 
 def test_retries_clamped_to_hard_cap():
-    assert Settings(max_retries=99).effective_max_retries == MAX_LOOPS_CAP
-    assert Settings(max_retries=99, max_loops_cap=50).effective_max_retries == MAX_LOOPS_CAP
+    # 15 rounds total = first pass + 14 retries
+    assert Settings(max_retries=99).effective_max_retries == MAX_LOOPS_CAP - 1
+    assert Settings(max_retries=99, max_loops_cap=50).effective_max_retries == MAX_LOOPS_CAP - 1
+    assert Settings(max_retries=99, max_loops_cap=4).effective_max_retries == 3
     assert Settings(max_retries=-3).effective_max_retries == 0
 
 
@@ -20,3 +22,10 @@ def test_from_env_reads_overrides(monkeypatch):
     s = Settings.from_env()
     assert s.max_retries == 5
     assert s.github_token == "abc"
+
+
+def test_reviewers_follow_num_agents():
+    assert Settings().reviewers() == ["quality", "correctness"]
+    assert Settings(num_agents=1).reviewers() == ["quality"]
+    assert Settings(num_agents=0).reviewers() == ["quality"]
+    assert Settings(num_agents=9).reviewers() == ["quality", "correctness"]

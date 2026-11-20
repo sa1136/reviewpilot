@@ -5,8 +5,12 @@ from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
-# Absolute ceiling on judge retry rounds. Enforced in code; config cannot exceed it.
+# Absolute ceiling on review rounds (first pass + retries). Enforced in code; config can only
+# lower it, never raise it.
 MAX_LOOPS_CAP = 15
+
+# Sub agents in the order num_agents picks them.
+AVAILABLE_AGENTS = ("quality", "correctness")
 
 DEFAULT_SKIP_GLOBS = (
     # Lockfiles
@@ -67,8 +71,13 @@ class Settings:
 
     @property
     def effective_max_retries(self) -> int:
-        """Retry rounds actually allowed: never above the hard cap, never negative."""
-        return max(0, min(self.max_retries, self.max_loops_cap, MAX_LOOPS_CAP))
+        """Retry rounds actually allowed. Total rounds (1 + retries) never exceed the hard cap."""
+        cap = min(self.max_loops_cap, MAX_LOOPS_CAP)
+        return max(0, min(self.max_retries, cap - 1))
+
+    def reviewers(self) -> list[str]:
+        """Sub agents to run, picked by num_agents (at least one)."""
+        return list(AVAILABLE_AGENTS[: max(1, self.num_agents)])
 
     @classmethod
     def from_env(cls) -> "Settings":

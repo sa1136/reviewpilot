@@ -22,6 +22,8 @@ Full plan: [docs/ReviewPilot_Action_Plan.pdf](docs/ReviewPilot_Action_Plan.pdf).
   reducers (`operator.add`). This avoids `InvalidUpdateError`.
 - Never commit secrets. Keys live in `.env`, which is gitignored. `.env.example` lists the names.
 - Keep code simple and readable. No extra abstractions we don't need yet.
+- Commit messages and PR descriptions carry no AI attribution: no `Co-Authored-By` trailer and no
+  "Generated with" line.
 
 ## Architecture
 
@@ -63,14 +65,29 @@ a second front door without changing the graph.
   Fewer, sharper comments.
 - **Oversized patches** are truncated at a hunk boundary and marked `truncated`; a file is skipped
   only if its first hunk alone exceeds `max_patch_chars`. Removed files are skipped.
-- **`FileDiff`** moves from `diff.py` into `models.py` as a Pydantic model in Stage 2.
-- **`num_agents`** gets wired up in Stage 2.
+- **`FileDiff`** and `SkippedFile` are Pydantic models in `models.py` (moved in Stage 2).
+- **`num_agents`** picks agents via `Settings.reviewers()` in the order quality, correctness
+  (so `num_agents=1` runs quality only).
+- **Rounds:** round 1 is the first pass. `max_retries` counts retry rounds (default 2, so up to 3
+  rounds). `MAX_LOOPS_CAP = 15` caps total rounds (first pass + retries), checked in
+  `judge.make_router`; config can only lower it.
+- **Judge semantics:** findings the judge does not decide on are dropped; `downgrade` without a
+  `new_severity` drops one level; `retry_agents` names not in `reviewers()` are ignored. If a round
+  has no candidates, the judge is not called and the loop ends.
+- **`candidates`** state key: `validate` writes the current round's findings there (overwrite), and
+  the judge reads it. `findings` is append-only so it cannot be filtered in place.
+- **Finding ids:** `Finding.id` is a 12 char sha1 of agent, file, line, title. `agent` and `round`
+  are set by our code and hidden from the model's JSON schema (`SkipJsonSchema`).
+- **Status:** `failed` if the judge errored or every agent failed on round 1 (then nothing is
+  reported as confirmed); `partial` if any other error; else `success`. Computed in `post_review`.
+- **CLI during development:** `--fake` runs the whole graph with demo fakes (no key);
+  `--diff-only` prints the numbered diff; without either, the CLI refuses until Stage 3.
 - **Models:** defaults are `claude-sonnet-5-5` (agents) and `claude-haiku-5-5` (judge). During
   development the local `.env` sets both to Haiku to save credits.
 - **Ruff** excludes `*.md` (it would otherwise reformat code sketches in Markdown).
 - **Sandbox repo:** `sa1136/reviewpilot-sandbox` is where test PRs with planted bugs are raised.
 
-## Data model (planned, Stage 2)
+## Data model
 
 ```python
 class Finding(BaseModel):
@@ -97,21 +114,24 @@ class ReviewState(TypedDict):
     usage: dict                                        # tokens and cost per node
 ```
 
-`FileDiff` currently lives in `reviewpilot/diff.py` (Stage 1).
+Actual definitions: `reviewpilot/models.py` and `reviewpilot/state.py` (the state also has
+`pr_title`, `pr_body`, `skipped`, `candidates` and `errors`; `usage` is an append list).
 
 ## Repo structure
 
 ```
 reviewpilot/
   config.py      settings from env (agents, max_retries, limits, models, skip globs)
-  models.py      Pydantic: Finding, AgentOutput, JudgeVerdict           (Stage 2)
+  models.py      Pydantic: FileDiff, Finding, AgentOutput, FindingDecision, JudgeVerdict
+  state.py       ReviewState TypedDict and initial_state()
+  llm.py         model factory (get_model), FakeModel, demo fakes for --fake
   github.py      fetch PR, files; post review, sticky summary (Stage 5)
   diff.py        parse hunks, number lines, valid line set, skip rules
   prompts/       quality.md, correctness.md, judge.md                    (Stage 3)
-  agents.py      sub agent nodes                                         (Stage 3)
-  validate.py    deterministic checks and dedupe                         (Stage 4)
-  judge.py       judge node and retry routing                            (Stage 4)
-  graph.py       StateGraph wiring                                       (Stage 2)
+  agents.py      sub agent nodes (placeholder prompts until Stage 3)
+  validate.py    deterministic checks and dedupe (pass through until Stage 4)
+  judge.py       judge node and retry routing with the hard cap
+  graph.py       StateGraph wiring, fetch_pr, post_review, status and summary
   cli.py         python -m reviewpilot --repo o/r --pr 12 --dry-run
 tests/           unit and graph path tests with a fake LLM
 evals/           seeded bug PRs and a scoring script                     (Stage 7)
@@ -127,7 +147,7 @@ docs/            action plan
   files with pagination (httpx); `diff.py` parses hunks, builds a numbered patch, computes valid new
   side lines; skip lockfiles, build output, images; cap files (40) and patch size per file.
   Done when: CLI prints the numbered diff of a real sandbox PR; unit tests for hunk parsing.
-- [ ] **Stage 2. LangGraph skeleton** — `models.py`, `config.py`, `graph.py` with nodes fetch_pr,
+- [x] **Stage 2. LangGraph skeleton** — `models.py`, `config.py`, `graph.py` with nodes fetch_pr,
   quality, correctness, validate, judge, post_review; fan out with `Send`, `Annotated` reducers,
   conditional retry edge; LLM injected via a factory. Done when: graph runs end to end with a fake
   LLM and a test asserts both agents ran.
@@ -167,5 +187,6 @@ docs/            action plan
 uv sync                                            # install
 uv run pytest                                      # tests
 uv run ruff check . && uv run ruff format --check .
-uv run python -m reviewpilot --repo owner/name --pr 12 --dry-run
+uv run python -m reviewpilot --repo owner/name --pr 12 --dry-run --fake   # full graph, fake model
+uv run python -m reviewpilot --repo owner/name --pr 12 --diff-only        # numbered diff only
 ```
