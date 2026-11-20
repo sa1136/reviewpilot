@@ -5,6 +5,7 @@ from reviewpilot.github import PullRequest
 from reviewpilot.graph import RECURSION_LIMIT, build_graph, run_review
 from reviewpilot.llm import FakeModel, fake_factory
 from reviewpilot.models import (
+    LANE_CATEGORIES,
     AgentFeedback,
     AgentOutput,
     Finding,
@@ -28,22 +29,45 @@ class FakeGitHub:
         return self.files
 
 
-def finding(title: str, line: int = 2, severity: str = "major") -> Finding:
+CODE = {2: "x = 1", 3: "y = x / 0"}  # added lines in PATCH
+
+
+def finding(title: str, line: int = 2, severity: str = "major", category="bug") -> Finding:
     return Finding(
         file="app.py",
         line=line,
         severity=severity,
-        category="bug",
+        category=category,
         title=title,
         body="Why it matters.",
-        evidence="x = 1",
+        evidence=CODE[line],
         confidence=0.9,
     )
 
 
+def role_of(msgs) -> str:
+    """Which agent a prompt is for, read from its system prompt ("Role: quality reviewer")."""
+    return msgs[0].content[0]["text"].split("Role: ", 1)[1].split()[0]
+
+
+def in_lane(title: str, msgs, line: int = 2) -> Finding:
+    return finding(title, line=line, category=LANE_CATEGORIES[role_of(msgs)][0])
+
+
 def agent_says(*titles: str) -> FakeModel:
-    """Fake agent that returns the same findings on every call."""
-    return FakeModel(lambda _msgs: AgentOutput(findings=[finding(t) for t in titles]))
+    """Fake agent that returns the same in lane findings on every call."""
+    return FakeModel(lambda msgs: AgentOutput(findings=[in_lane(t, msgs) for t in titles]))
+
+
+def agent_says_new(prefix: str) -> FakeModel:
+    """Fake agent that reports a different issue every call, so nothing is a repeat."""
+    calls = []
+
+    def respond(msgs):
+        calls.append(1)
+        return AgentOutput(findings=[in_lane(f"{prefix}{len(calls)}", msgs)])
+
+    return FakeModel(respond)
 
 
 def ids_shown(msgs) -> list[str]:
@@ -153,7 +177,7 @@ def test_retry_only_correctness_and_round_two_is_judged():
 
 # 5
 def test_always_retry_stops_at_max_retries():
-    q, c = agent_says("q"), agent_says("c")
+    q, c = agent_says_new("q"), agent_says_new("c")
     j = FakeModel(judge("reject", retry=["quality", "correctness"]))
     result = run({"quality": q, "correctness": c, "judge": j}, Settings(max_retries=2))
 
@@ -164,7 +188,7 @@ def test_always_retry_stops_at_max_retries():
 
 # 6
 def test_max_retries_fifty_still_stops_at_hard_cap():
-    q, c = agent_says("q"), agent_says("c")
+    q, c = agent_says_new("q"), agent_says_new("c")
     j = FakeModel(judge("reject", retry=["quality", "correctness"]))
     result = run({"quality": q, "correctness": c, "judge": j}, Settings(max_retries=50))
 
@@ -230,8 +254,8 @@ def test_judge_raises_status_failed_nothing_accepted():
 
 # 10
 def test_trace_node_order_for_one_retry():
-    q, c = agent_says("q1"), agent_says("c1")
-    j = FakeModel(sequence(judge(retry=["correctness"]), judge()))
+    q, c = agent_says("q1"), agent_says_new("c")
+    j = FakeModel(sequence(judge("reject", retry=["correctness"]), judge()))
     models = {"quality": q, "correctness": c, "security": agent_says(), "judge": j}
     graph = build_graph(Settings(), fake_factory(models), FakeGitHub())
 
@@ -281,7 +305,7 @@ def test_router_runs_only_routed_agents_and_records_reasons():
     assert result["route_reasons"]["quality"] == "docs only PR"
     assert c.calls == s.calls == []
     assert len(q.calls) == 1
-    assert result["summary"].index("Route: quality") < result["summary"].index("### app.py")
+    assert "Route: quality\n- correctness: skipped: docs only PR" in result["summary"]
 
 
 def test_retry_feedback_reaches_agent_in_feedback_block_with_file_prompt():
@@ -301,3 +325,94 @@ def test_retry_feedback_reaches_agent_in_feedback_block_with_file_prompt():
     assert "Role: correctness reviewer" in system_text
     assert second[0].content[0]["cache_control"] == {"type": "ephemeral"}
     assert "<untrusted_pr>" in second[-1].content
+
+
+def verdict(decisions, retry=(), feedback=()):
+    return lambda msgs: JudgeVerdict(
+        decisions=[
+            FindingDecision(finding_id=i, **d)
+            for i, d in zip(ids_shown(msgs), decisions, strict=True)
+        ],
+        retry_agents=list(retry),
+        feedback=list(feedback),
+    )
+
+
+def test_retry_needs_more_than_half_rejected():
+    # correctness had 2 findings; exactly half rejected is not enough to retry
+    c = FakeModel(
+        lambda msgs: AgentOutput(findings=[in_lane("c-a", msgs), in_lane("c-b", msgs, 3)])
+    )
+    j = FakeModel(verdict([{"decision": "confirm"}, {"decision": "reject"}], retry=["correctness"]))
+    run({"correctness": c, "judge": j}, Settings(num_agents=1))
+    assert len(c.calls) == 1
+
+    # its only finding rejected: more than half, so the retry goes through
+    c = agent_says_new("c")
+    j = FakeModel(sequence(verdict([{"decision": "reject"}], retry=["correctness"]), judge()))
+    run({"correctness": c, "judge": j}, Settings(num_agents=1))
+    assert len(c.calls) == 2
+
+
+def test_clear_miss_allows_retry_even_when_findings_were_right():
+    c = agent_says_new("c")
+    miss = AgentFeedback(agent="correctness", feedback="line 3 divides by zero", clear_miss=True)
+    j = FakeModel(sequence(verdict([{"decision": "confirm"}], ["correctness"], [miss]), judge()))
+    run({"correctness": c, "judge": j}, Settings(num_agents=1))
+    assert len(c.calls) == 2
+
+
+def test_accepted_findings_reach_the_retry_prompt():
+    c = FakeModel(
+        [
+            AgentOutput(findings=[finding("Divides by zero", line=3)]),
+            AgentOutput(findings=[finding("Unused variable x", line=2)]),
+        ]
+    )
+    miss = AgentFeedback(agent="correctness", feedback="look again at x", clear_miss=True)
+    j = FakeModel(sequence(verdict([{"decision": "confirm"}], ["correctness"], [miss]), judge()))
+    run({"correctness": c, "judge": j}, Settings(num_agents=1))
+
+    retry_prompt = c.calls[1][-1].content
+    assert "<accepted_findings>\n- app.py:3 [major] Divides by zero\n</accepted_findings>" in (
+        retry_prompt
+    )
+    assert "look again at x" in retry_prompt
+
+
+def test_repeat_of_accepted_is_dropped_before_the_judge_sees_it():
+    c = agent_says("Divides by zero")  # says the same thing every round
+    miss = AgentFeedback(agent="correctness", feedback="anything else?", clear_miss=True)
+    j = FakeModel(sequence(verdict([{"decision": "confirm"}], ["correctness"], [miss]), judge()))
+    result = run({"correctness": c, "judge": j}, Settings(num_agents=1))
+
+    assert len(c.calls) == 2
+    assert len(j.calls) == 1  # round 2 had only the repeat, so the judge was not called again
+    assert [d["reason"] for d in result["dropped"]] == [
+        "repeat: same as an accepted finding (correctness)"
+    ]
+    assert len(result["accepted"]) == 1
+
+
+def test_judge_final_severity_is_applied():
+    c = agent_says("Divides by zero")
+    j = FakeModel(verdict([{"decision": "confirm", "final_severity": "critical"}]))
+    result = run({"correctness": c, "judge": j}, Settings(num_agents=1))
+    assert [f.severity for f in result["accepted"]] == ["critical"]
+
+
+def test_out_of_lane_is_listed_in_the_summary_and_nits_stay_out_of_inline():
+    q = FakeModel(
+        lambda msgs: AgentOutput(
+            findings=[
+                finding("Crashes on zero", line=3, category="bug"),  # out of lane for quality
+                finding("Name x is vague", line=2, category="naming", severity="nit"),
+            ]
+        )
+    )
+    result = run({"quality": q, "judge": FakeModel(judge())}, Settings(num_agents=2))
+
+    assert result["inline"] == []
+    assert [f.title for f in result["nits"]] == ["Name x is vague"]
+    assert "Nits:\n- app.py:2 Name x is vague" in result["summary"]
+    assert "out of lane: app.py:3 Crashes on zero" in result["summary"]

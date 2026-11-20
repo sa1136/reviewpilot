@@ -19,6 +19,8 @@ class ReviewState(TypedDict):
     # Appended to by parallel nodes, so they need a reducer.
     findings: Annotated[list[Finding], operator.add]  # every agent finding, all rounds
     accepted: Annotated[list[Finding], operator.add]  # confirmed or downgraded by the judge
+    judged: Annotated[list[Finding], operator.add]  # everything the judge decided on, all rounds
+    dropped: Annotated[list[dict], operator.add]  # {"finding", "round", "reason"} from validate
     errors: Annotated[list[dict], operator.add]  # {"node", "round", "error"}
     usage: Annotated[list[dict], operator.add]  # per call: node, round, model, tokens, ms, cost
 
@@ -30,6 +32,9 @@ class ReviewState(TypedDict):
     retry_agents: list[str]
     judge_feedback: dict[str, str]
     summary: str
+    inline: list[Finding]  # post_review: findings that become inline comments
+    nits: list[Finding]  # post_review: below min_inline_severity, summary only
+    overflow: list[Finding]  # post_review: over the max_comments budget, summary only
     status: str  # success | partial | failed
     started_at: float  # time.time() when the run began, for the footer
 
@@ -45,6 +50,8 @@ def initial_state(repo: str, pr_number: int) -> ReviewState:
         skipped=[],
         findings=[],
         accepted=[],
+        judged=[],
+        dropped=[],
         errors=[],
         usage=[],
         candidates=[],
@@ -54,6 +61,9 @@ def initial_state(repo: str, pr_number: int) -> ReviewState:
         retry_agents=[],
         judge_feedback={},
         summary="",
+        inline=[],
+        nits=[],
+        overflow=[],
         status="",
         started_at=time.time(),
     )

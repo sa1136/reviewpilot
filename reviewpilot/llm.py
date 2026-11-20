@@ -13,6 +13,7 @@ from typing import Any
 
 from reviewpilot.config import AVAILABLE_AGENTS, Settings, estimate_cost
 from reviewpilot.models import (
+    LANE_CATEGORIES,
     AgentOutput,
     Finding,
     FindingDecision,
@@ -169,7 +170,7 @@ def _demo_agent(role: str, index: int) -> Callable[[list], AgentOutput]:
             file=file,
             line=line,
             severity="minor",
-            category="demo",
+            category=LANE_CATEGORIES[role][0],
             title=f"Demo {role} finding",
             body="Placeholder finding from the fake model.",
             evidence=code.strip(),

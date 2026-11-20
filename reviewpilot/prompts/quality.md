@@ -11,6 +11,15 @@ Look for:
 - missing or weak tests for new behavior: a new public function, or a changed behavior, with no
   test in this PR that exercises it
 
+Missing test findings (category `missing_test`):
+- Point at the `def` line of the untested function, and quote that `def` line as evidence.
+- Only valid if no test file in this PR references that function by name. Check the test files
+  in the diff before reporting.
+- One finding per untested function.
+
+Allowed categories: readability, naming, duplication, dead_code, error_handling, missing_test,
+weak_test, maintainability.
+
 Do not report:
 - bugs, wrong results or edge cases (the correctness reviewer covers those)
 - security issues (the security reviewer covers those)

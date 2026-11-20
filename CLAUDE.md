@@ -101,9 +101,41 @@ The checkpointer is what lets the graph stop at approval and pick up later, even
 - **Prompt caching:** system prompts carry `cache_control: ephemeral` (langchain-anthropic passes
   it through cleanly). Confirmed working on Haiku 5.5: the first run wrote 6,337 tokens, later
   runs within 5 minutes read 6k to 12k cached tokens. The footer shows cache read / written.
-- **Stage 4 inputs from the Stage 3 baseline:** retries mostly produced repeats of already
-  accepted findings (dedupe against `accepted`), quality repeated correctness's bug (lane check
-  or cross agent dedupe), and correctness never flagged the uncapped discount on cart.py 68.
+- **Lanes:** `Finding.category` is a fixed enum; `models.LANE_CATEGORIES` lists each agent's
+  allowed categories (also listed in each agent prompt). A finding with another lane's category
+  is dropped as `out_of_lane` and listed in the summary.
+- **Validate rules** (`validate.py`, in order, first failure wins, reason recorded in `dropped`):
+  on an added line; evidence appears in that line (whitespace trimmed and collapsed; multi line
+  evidence must match consecutive added lines); category in the agent's lane; `missing_test`
+  findings must be on a `def`/`function` line and the function must not appear in any test file
+  in the PR diff; not a repeat of anything the judge already saw (`judged`, so accepted and
+  rejected); not a duplicate of another finding this round. Same issue = same file, same line,
+  and title token overlap coefficient >= 0.5 (stopwords removed). On a cross agent collision the
+  lane owner wins via agent order correctness > security > quality.
+- **No confidence threshold.** Not in the Stage 4 spec, and the Stage 3 data showed a real bug at
+  confidence 0.55, so a 0.5 cut would be fragile.
+- **Judge:** sets `final_severity` from the rubric for confirm and downgrade (downgrade without it
+  drops one level). Retries are filtered in code (`judge.allowed_retries`): an agent is sent back
+  only if more than half of its findings that round were rejected (silence counts as rejected) or
+  the judge set `clear_miss` on its feedback. A retried agent gets its feedback plus its own
+  accepted findings in `<accepted_findings>`.
+- **Comment plan** (`output.plan_comments`): inline = accepted findings at or above
+  `min_inline_severity` (default minor) on added lines, most severe first, capped at
+  `max_comments` (20); nits go to a "Nits" list in the summary; overflow goes to "More findings".
+  `post_review` writes `inline`, `nits`, `overflow` to state for Stage 5 to post.
+- **Holdout discipline:** PR #2 (`evals/planted/pr2.md`) is never used for tuning. Tune on PR #1.
+- **Stage 4 results** (3 runs each, Haiku): PR #1 6/6 bugs in all runs, 2 false positives (both
+  nits, none inline), no retries, $0.0046 avg. PR #2 holdout 4/6 in all runs, 0 false positives,
+  $0.0031 avg; misses were the judge rejecting a negative stock bug (2 of 3 runs) and one finding
+  with the wrong file path dropped by validation. Known gaps: judge `final_severity` still varies
+  run to run; every untested new function now gets a missing test comment.
+- **iCloud warning:** this repo lives in an iCloud synced Desktop folder. macOS offloaded
+  thousands of files (`.venv`, `.git` objects, `__pycache__`) as "dataless", and reading one
+  blocks until iCloud downloads it, which hung pytest and the CLI. Workaround used in the
+  Stage 4 session: `export UV_PROJECT_ENVIRONMENT=$HOME/.venvs/reviewpilot
+  PYTHONPYCACHEPREFIX=$HOME/.cache/reviewpilot-pycache` before `uv` commands. The real fix is
+  moving the repo out of Desktop/Documents (for example `~/code/reviewpilot`) or marking the
+  folder "Keep Downloaded" in Finder.
 - **Dry run output:** route and reasons, then findings grouped by file, then a footer with status,
   rounds, judged / confirmed / rejected counts, tokens, estimated cost and total time.
 - **Inline comments go on added lines only** (`FileDiff.added_lines`). A finding on an unchanged
@@ -137,17 +169,19 @@ The checkpointer is what lets the graph stop at approval and pick up later, even
 ```
 reviewpilot/                # the engine (Python)
   config.py   settings from env, agent sets, pricing and cost estimate
-  models.py   Pydantic: FileDiff, SkippedFile, Finding, AgentOutput, FindingDecision, JudgeVerdict
+  models.py   Pydantic: FileDiff, SkippedFile, Finding, AgentOutput, FindingDecision, JudgeVerdict,
+              lane categories
   state.py    ReviewState TypedDict and initial_state()
   llm.py      model factory (get_model), call_model + usage, FakeModel, demo fakes for --fake
   github.py   fetch PR and files (posting in Stage 5)
   diff.py     parse hunks, number lines, valid / added line sets, skip rules
   router.py   picks agents from changed paths
   agents.py   sub agent nodes
-  validate.py deterministic checks and dedupe (pass through until Stage 4)
+  validate.py deterministic checks: added line, evidence, lane, missing test, repeats, dedupe
   judge.py    judge node and retry routing with the hard cap
   approval.py interrupt() and resume                                    (Stage 6)
-  graph.py    StateGraph wiring, fetch_pr, router node, post_review, summary
+  output.py   comment plan (inline / nits / overflow) and the summary text
+  graph.py    StateGraph wiring, fetch_pr, router node, post_review
   cli.py      python -m reviewpilot --repo o/r --pr 12 --dry-run
   prompts/    correctness.md security.md quality.md judge.md agent_rules.md
 api/          FastAPI: start review, SSE stream, approve, post          (Stage 7, not created yet)
@@ -168,10 +202,11 @@ docs/         action plans
   logging; planted bug PR #1 in the sandbox and a first dry run. Done: baseline of 3 runs in
   `evals/planted/pr1.md` (4 of 6 bugs caught every run, discount over 100% never raised,
   0 to 3 false positives, $0.004 to $0.007 and 17 to 43 s per run on Haiku 5.5).
-- [ ] **Stage 4. Validate, judge and the loop** — drop findings not on an added line or with
+- [x] **Stage 4. Validate, judge and the loop** — drop findings not on an added line or with
   evidence not in the code; dedupe across rounds and against accepted; judge prompt tuned on PR #1;
-  retry only the agents that were mostly wrong. Done when: fewer false positives on PR #1 than
-  Stage 3, and tests for every rule.
+  retry only the agents that were mostly wrong. Done: PR #1 false positives 4 -> 2 (none inline),
+  bugs caught in all 3 runs 4 -> 6 of 6; holdout PR #2 4 of 6 in all runs with 0 false positives;
+  tests for every rule. Details in `evals/planted/pr1.md` and `pr2.md`.
 - [ ] **Stage 5. Post to GitHub** — one PR review with inline comments on added lines, one sticky
   summary found by a hidden marker. Done when: comments land in the right places on the sandbox PR.
 - [ ] **Stage 6. Human approval and persistence** — `interrupt()` before post_review with the

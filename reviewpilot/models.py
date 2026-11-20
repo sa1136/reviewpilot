@@ -9,6 +9,62 @@ from pydantic.json_schema import SkipJsonSchema
 Severity = Literal["critical", "major", "minor", "nit"]
 SEVERITY_ORDER: tuple[Severity, ...] = ("critical", "major", "minor", "nit")
 
+# Each agent may only use the categories of its own lane (enforced in validate.py).
+LANE_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "correctness": (
+        "bug",
+        "logic",
+        "off_by_one",
+        "edge_case",
+        "null_or_empty",
+        "range_check",
+        "race_condition",
+        "exception",
+    ),
+    "security": (
+        "injection",
+        "secret_exposure",
+        "auth",
+        "unsafe_input",
+        "deserialization",
+        "crypto",
+    ),
+    "quality": (
+        "readability",
+        "naming",
+        "duplication",
+        "dead_code",
+        "error_handling",
+        "missing_test",
+        "weak_test",
+        "maintainability",
+    ),
+}
+Category = Literal[
+    "bug",
+    "logic",
+    "off_by_one",
+    "edge_case",
+    "null_or_empty",
+    "range_check",
+    "race_condition",
+    "exception",
+    "injection",
+    "secret_exposure",
+    "auth",
+    "unsafe_input",
+    "deserialization",
+    "crypto",
+    "readability",
+    "naming",
+    "duplication",
+    "dead_code",
+    "error_handling",
+    "missing_test",
+    "weak_test",
+    "maintainability",
+]
+
 
 class FileDiff(BaseModel):
     path: str
@@ -17,6 +73,7 @@ class FileDiff(BaseModel):
     numbered_patch: str
     valid_lines: set[int]  # new side lines in the diff (added + context)
     added_lines: set[int]  # new side lines added by this PR; only these get inline comments
+    added_code: dict[int, str] = Field(default_factory=dict)  # added line -> code (evidence)
     previous_path: str | None = None
     truncated: bool = False
 
@@ -30,7 +87,7 @@ class Finding(BaseModel):
     file: str = Field(description="Path of the file in the PR")
     line: int = Field(description="New side line number taken from the numbered diff")
     severity: Severity
-    category: str = Field(description="bug, edge_case, security, naming, tests, ...")
+    category: Category = Field(description="One of the categories allowed for your role")
     title: str = Field(description="One line summary")
     body: str = Field(description="Why it matters, 1 to 3 sentences")
     suggestion: str | None = Field(default=None, description="Optional fix")
@@ -61,13 +118,18 @@ class AgentOutput(BaseModel):
 class FindingDecision(BaseModel):
     finding_id: str
     decision: Literal["confirm", "reject", "downgrade"]
-    new_severity: Severity | None = None
+    final_severity: Severity | None = Field(
+        default=None, description="Severity from the rubric, for confirm and downgrade"
+    )
     reason: str = ""
 
 
 class AgentFeedback(BaseModel):
     agent: str
     feedback: str
+    clear_miss: bool = Field(
+        default=False, description="True if the agent clearly missed an obvious issue"
+    )
 
 
 class JudgeVerdict(BaseModel):

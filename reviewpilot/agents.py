@@ -37,6 +37,9 @@ def build_agent_messages(name: str, state: dict) -> list:
     feedback = state.get("judge_feedback", {}).get(name)
     if feedback:
         parts.append(f"<judge_feedback>\n{feedback}\n</judge_feedback>")
+        mine = [f for f in state.get("accepted", []) if f.agent == name]
+        listed = "\n".join(f"- {f.file}:{f.line} [{f.severity}] {f.title}" for f in mine)
+        parts.append(f"<accepted_findings>\n{listed or '(none)'}\n</accepted_findings>")
     parts.append(f"Review this pull request as the {name} reviewer.")
     return [cached_system(agent_system_prompt(name)), HumanMessage("\n\n".join(parts))]
 

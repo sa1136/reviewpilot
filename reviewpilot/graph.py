@@ -1,19 +1,16 @@
 """StateGraph wiring:
 fetch_pr -> router -> (agents in parallel) -> validate -> judge -> retry or post_review."""
 
-import time
-from collections import defaultdict
-
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
 from reviewpilot.agents import make_agent_node
-from reviewpilot.config import MAX_LOOPS_CAP, PRICING_CHECKED, Settings
+from reviewpilot.config import MAX_LOOPS_CAP, Settings
 from reviewpilot.diff import build_file_diffs
 from reviewpilot.github import GitHubClient
 from reviewpilot.judge import make_judge_node, make_router
-from reviewpilot.llm import ModelFactory, real_model_factory, run_totals
-from reviewpilot.models import Finding
+from reviewpilot.llm import ModelFactory, real_model_factory
+from reviewpilot.output import format_summary, plan_comments
 from reviewpilot.router import route
 from reviewpilot.state import ReviewState, initial_state
 from reviewpilot.validate import validate
@@ -31,61 +28,6 @@ def compute_status(errors: list[dict], agents: list[str]) -> str:
     if agents and set(agents) <= failed_first_pass:
         return "failed"
     return "partial" if errors else "success"
-
-
-def format_summary(state: dict, accepted: list[Finding], status: str) -> str:
-    out = [f"## ReviewPilot summary for {state['repo']}#{state['pr_number']}", ""]
-
-    out.append(f"Route: {', '.join(state['route']) or '(no agents)'}")
-    out.extend(f"- {agent}: {reason}" for agent, reason in state["route_reasons"].items())
-    out.append("")
-
-    if status == "failed":
-        out.append("The review failed, so no findings are reported as confirmed.")
-    elif not state["route"]:
-        out.append("No reviewer applies to these changes, so nothing was reviewed.")
-    elif not accepted:
-        out.append(
-            "No issues confirmed, but the review was incomplete (see errors)."
-            if status == "partial"
-            else "No issues found."
-        )
-    by_file: dict[str, list[Finding]] = defaultdict(list)
-    for f in accepted:
-        by_file[f.file].append(f)
-    for path, items in by_file.items():
-        out.append(f"### {path}")
-        for f in sorted(items, key=lambda f: f.line):
-            out.append(f"- line {f.line} [{f.severity}] {f.title} ({f.agent}, round {f.round})")
-            out.append(f"  {f.body}")
-            if f.suggestion:
-                out.append(f"  Suggestion: {f.suggestion}")
-
-    if state["skipped"]:
-        out.append("\nSkipped files:")
-        out.extend(f"- {s.path}: {s.reason}" for s in state["skipped"])
-    if state["errors"]:
-        out.append("\nErrors:")
-        out.extend(f"- {e['node']} (round {e['round']}): {e['error']}" for e in state["errors"])
-
-    judged = sum(u.get("judged", 0) for u in state["usage"])
-    confirmed = sum(u.get("accepted", 0) for u in state["usage"])
-    totals = run_totals(state["usage"])
-    cost = f"${totals['cost_usd']:.4f}" + ("" if totals["cost_complete"] else " (partial)")
-    rounds = max(state["round"] - 1, 0)
-    elapsed = time.time() - state["started_at"]
-    out += [
-        "",
-        "---",
-        f"Status: {status} | rounds: {rounds} | files reviewed: {len(state['files'])} | "
-        f"skipped: {len(state['skipped'])}",
-        f"Judged: {judged} | confirmed: {confirmed} | rejected: {judged - confirmed} | "
-        f"shown: {len(accepted)}",
-        f"Tokens: {totals['input_tokens']:,} in / {totals['output_tokens']:,} out | "
-        f"cache: {totals['cache_read_tokens']:,} read / {totals['cache_write_tokens']:,} written",
-        f"Est. cost: {cost} (prices checked {PRICING_CHECKED}) | time: {elapsed:.1f}s",
-    ]
-    return "\n".join(out)
 
 
 def build_graph(
@@ -130,12 +72,19 @@ def build_graph(
     def post_review(state: ReviewState) -> dict:
         status = compute_status(state["errors"], state["route"])
         accepted = [] if status == "failed" else state["accepted"]
-        summary = format_summary(state, accepted, status)
+        plan = plan_comments(accepted, state["files"], settings)
+        summary = format_summary(state, plan, status)
         if dry_run:
             print(summary)
         else:
             print("Posting to GitHub arrives in Stage 5. Printing instead:\n" + summary)
-        return {"summary": summary, "status": status}
+        return {
+            "summary": summary,
+            "status": status,
+            "inline": plan.inline,
+            "nits": plan.nits,
+            "overflow": plan.overflow,
+        }
 
     graph = StateGraph(ReviewState)
     graph.add_node("fetch_pr", fetch_pr)

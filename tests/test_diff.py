@@ -149,3 +149,13 @@ def test_patch_with_oversized_first_hunk_is_skipped():
     )
     assert diffs == []
     assert "patch over" in skipped[0].reason
+
+
+def test_added_code_maps_added_lines_to_code():
+    from reviewpilot.diff import added_code
+
+    assert added_code(parse_hunks(MULTI_HUNK)) == {
+        2: "import sys",
+        22: "    y = 3",
+        23: "    z = 4",
+    }

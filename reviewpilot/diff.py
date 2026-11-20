@@ -77,6 +77,21 @@ def number_hunks(hunks: list[Hunk]) -> tuple[str, set[int], set[int]]:
     return "\n".join(out), valid, added
 
 
+def added_code(hunks: list[Hunk]) -> dict[int, str]:
+    """New side line number -> code for every added line (without the leading `+`)."""
+    out: dict[int, str] = {}
+    for hunk in hunks:
+        new_line = hunk.new_start
+        for raw in hunk.lines:
+            if raw.startswith("\\"):
+                continue
+            if raw.startswith("+"):
+                out[new_line] = raw[1:]
+            if not raw.startswith("-"):
+                new_line += 1
+    return out
+
+
 def should_skip(path: str, skip_globs: tuple[str, ...]) -> bool:
     name = PurePosixPath(path).name
     return any(fnmatch(path, g) or fnmatch(name, g) for g in skip_globs)
@@ -138,6 +153,7 @@ def build_file_diffs(
                 numbered_patch=numbered,
                 valid_lines=valid,
                 added_lines=added,
+                added_code=added_code(hunks),
                 previous_path=f.get("previous_filename"),
                 truncated=truncated,
             )

@@ -109,6 +109,7 @@ class Settings:
     max_files: int = 40
     max_patch_chars: int = 12000
     max_comments: int = 20
+    min_inline_severity: str = "minor"  # nits never become inline comments
 
     agent_model: str = "claude-sonnet-5-5"
     judge_model: str = "claude-haiku-5-5"

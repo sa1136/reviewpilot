@@ -30,9 +30,12 @@
 
 ## Retry rounds
 - If a `<judge_feedback>` block is present, this is a retry round. Use that feedback to fix or
-  drop your earlier findings and to look again where the judge says you missed something. Return
-  your full, corrected list.
+  drop your earlier findings and to look again where the judge says you missed something.
+- On a retry round you are given the findings already accepted in `<accepted_findings>`. Never
+  repeat them. Return only new or corrected findings.
 
 ## Output fields
+- `category`: one of the categories allowed for your role (listed above). A finding with another
+  reviewer's category is out of your lane and is dropped.
 - `title`: one line. `body`: why it matters, 1 to 3 sentences. `suggestion`: a concrete fix, or
   null. `confidence`: 0 to 1. `notes`: one short sentence about the review, or empty.

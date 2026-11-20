@@ -35,6 +35,22 @@ def _one_level_lower(severity: str) -> str:
     return SEVERITY_ORDER[min(i + 1, len(SEVERITY_ORDER) - 1)]
 
 
+def allowed_retries(verdict, candidates: list[Finding], accepted: list[Finding], route: list[str]):
+    """Agents the judge may send back: only agents in this PR's route, and only if more than half
+    of the agent's findings this round were rejected, or the judge flagged a clear miss."""
+    allowed = []
+    for agent in dict.fromkeys(verdict.retry_agents):
+        if agent not in route:
+            continue
+        total = sum(1 for f in candidates if f.agent == agent)
+        rejected = total - sum(1 for f in accepted if f.agent == agent)
+        mostly_wrong = total > 0 and rejected / total > 0.5
+        clear_miss = any(fb.agent == agent and fb.clear_miss for fb in verdict.feedback)
+        if mostly_wrong or clear_miss:
+            allowed.append(agent)
+    return allowed
+
+
 def make_judge_node(model, model_name: str):
     def judge(state: dict) -> dict:
         rnd = state["round"]
@@ -61,15 +77,19 @@ def make_judge_node(model, model_name: str):
             finding = pending.pop(d.finding_id, None)
             if finding is None or d.decision == "reject":
                 continue
-            if d.decision == "downgrade":
-                severity = d.new_severity or _one_level_lower(finding.severity)
-                finding = finding.model_copy(update={"severity": severity})
+            if d.final_severity:
+                finding = finding.model_copy(update={"severity": d.final_severity})
+            elif d.decision == "downgrade":
+                finding = finding.model_copy(
+                    update={"severity": _one_level_lower(finding.severity)}
+                )
             accepted.append(finding)
 
-        retry = [a for a in dict.fromkeys(verdict.retry_agents) if a in state["route"]]
+        retry = allowed_retries(verdict, candidates, accepted, state["route"])
         usage = {**result.usage, "judged": len(candidates), "accepted": len(accepted)}
         return {
             "accepted": accepted,
+            "judged": candidates,
             "round": rnd + 1,
             "retry_agents": retry,
             "judge_feedback": {a: verdict.feedback_for(a) for a in retry},
