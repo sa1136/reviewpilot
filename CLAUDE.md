@@ -123,19 +123,39 @@ The checkpointer is what lets the graph stop at approval and pick up later, even
   `min_inline_severity` (default minor) on added lines, most severe first, capped at
   `max_comments` (20); nits go to a "Nits" list in the summary; overflow goes to "More findings".
   `post_review` writes `inline`, `nits`, `overflow` to state for Stage 5 to post.
+- **Severity floor** (`models.SEVERITY_FLOOR`, applied in `judge.py` after the judge's
+  `final_severity`): injection and secret_exposure (hardcoded secrets, secrets in logs) are always
+  critical; every correctness category is at least major. The judge can raise, never lower.
+- **Possible issues:** correctness and security findings the judge rejects (or leaves undecided)
+  are kept in `possible_issues` with the judge's reason and shown in the summary under "Possible
+  issues (judge was not sure)"; a human decides on them in Stage 6. Quality rejects drop silently.
+- **Missing test findings are never inline.** `plan_comments` puts them in `untested`, shown as
+  one summary line "New functions without tests: a, b, c". A planted missing test bug counts as
+  caught if its function is on that line.
+- **Posting** (`GitHubClient.post_review`): one review per head commit, `event=COMMENT`,
+  `commit_id=head_sha`, comments with `path`, `line`, `side=RIGHT`. The review body carries
+  `<!-- reviewpilot:sha=SHA -->`; if a review with that marker exists, the review is skipped and
+  only the summary is updated. No review is posted when there are no inline comments. Inline
+  body: label line (severity, agent, category), bold title, explanation, suggestion in a plain
+  code block. On a 422 for the batch, the review body is posted alone and each comment is retried
+  separately; comments GitHub still rejects go to a "Could not be posted inline" summary section.
+- **Sticky summary:** an issue comment containing `<!-- reviewpilot:summary -->`, PATCHed if it
+  exists, else created. Layout: status, errors, route and reasons, counts by severity, must fix
+  (critical and major), possible issues, not posted inline (budget overflow), nits, new functions
+  without tests, skipped files, then a footer (rounds, judged / confirmed / rejected, dropped
+  reasons, tokens, cache, cost, time, out of lane drops).
+- **CLI posting:** a dry run is the default. `--post` actually posts, refuses to run without
+  `GITHUB_TOKEN` (prints the needed permissions: Pull requests read and write on the target repo)
+  and cannot be combined with `--dry-run`, `--fake` or `--diff-only`. Comments are posted as the
+  token's user until the Stage 10 GitHub App.
+- **Repo location:** `~/code/reviewpilot` (outside iCloud). The sandbox clone is at
+  `~/code/reviewpilot-sandbox`.
 - **Holdout discipline:** PR #2 (`evals/planted/pr2.md`) is never used for tuning. Tune on PR #1.
 - **Stage 4 results** (3 runs each, Haiku): PR #1 6/6 bugs in all runs, 2 false positives (both
   nits, none inline), no retries, $0.0046 avg. PR #2 holdout 4/6 in all runs, 0 false positives,
   $0.0031 avg; misses were the judge rejecting a negative stock bug (2 of 3 runs) and one finding
   with the wrong file path dropped by validation. Known gaps: judge `final_severity` still varies
   run to run; every untested new function now gets a missing test comment.
-- **iCloud warning:** this repo lives in an iCloud synced Desktop folder. macOS offloaded
-  thousands of files (`.venv`, `.git` objects, `__pycache__`) as "dataless", and reading one
-  blocks until iCloud downloads it, which hung pytest and the CLI. Workaround used in the
-  Stage 4 session: `export UV_PROJECT_ENVIRONMENT=$HOME/.venvs/reviewpilot
-  PYTHONPYCACHEPREFIX=$HOME/.cache/reviewpilot-pycache` before `uv` commands. The real fix is
-  moving the repo out of Desktop/Documents (for example `~/code/reviewpilot`) or marking the
-  folder "Keep Downloaded" in Finder.
 - **Dry run output:** route and reasons, then findings grouped by file, then a footer with status,
   rounds, judged / confirmed / rejected counts, tokens, estimated cost and total time.
 - **Inline comments go on added lines only** (`FileDiff.added_lines`). A finding on an unchanged
@@ -173,7 +193,7 @@ reviewpilot/                # the engine (Python)
               lane categories
   state.py    ReviewState TypedDict and initial_state()
   llm.py      model factory (get_model), call_model + usage, FakeModel, demo fakes for --fake
-  github.py   fetch PR and files (posting in Stage 5)
+  github.py   fetch PR and files; post one review per head commit; sticky summary comment
   diff.py     parse hunks, number lines, valid / added line sets, skip rules
   router.py   picks agents from changed paths
   agents.py   sub agent nodes
@@ -207,8 +227,10 @@ docs/         action plans
   retry only the agents that were mostly wrong. Done: PR #1 false positives 4 -> 2 (none inline),
   bugs caught in all 3 runs 4 -> 6 of 6; holdout PR #2 4 of 6 in all runs with 0 false positives;
   tests for every rule. Details in `evals/planted/pr1.md` and `pr2.md`.
-- [ ] **Stage 5. Post to GitHub** — one PR review with inline comments on added lines, one sticky
-  summary found by a hidden marker. Done when: comments land in the right places on the sandbox PR.
+- [x] **Stage 5. Post to GitHub** — one PR review with inline comments on added lines, one sticky
+  summary found by a hidden marker. Done: reviews posted to sandbox PR #1 and #2 with comments on
+  the right lines; a second `--post` on PR #1 skipped the review and only updated the summary.
+  Also: severity floor, possible issues, missing tests as one summary line.
 - [ ] **Stage 6. Human approval and persistence** — `interrupt()` before post_review with the
   pending comments as payload; resume with `Command(resume=...)` holding approve / edit / reject
   per comment; SqliteSaver for dev, PostgresSaver behind an env flag; thread_id `repo#pr@sha`; CLI
@@ -242,7 +264,8 @@ uv sync                                            # install
 uv run pytest                                      # tests (live test skipped)
 RUN_LIVE=1 uv run pytest -m live                   # one real API call, costs a little
 uv run ruff check . && uv run ruff format --check .
-uv run python -m reviewpilot --repo owner/name --pr 12 --dry-run          # real review, printed
-uv run python -m reviewpilot --repo owner/name --pr 12 --dry-run --fake   # full graph, fake model
-uv run python -m reviewpilot --repo owner/name --pr 12 --diff-only        # numbered diff only
+uv run python -m reviewpilot --repo owner/name --pr 12              # real review, printed (dry run)
+uv run python -m reviewpilot --repo owner/name --pr 12 --post       # real review, posted to the PR
+uv run python -m reviewpilot --repo owner/name --pr 12 --fake       # full graph, fake model
+uv run python -m reviewpilot --repo owner/name --pr 12 --diff-only  # numbered diff only
 ```

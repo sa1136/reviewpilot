@@ -6,8 +6,11 @@ from langgraph.types import Send
 from reviewpilot.agents import cached_system, untrusted_pr_block
 from reviewpilot.config import MAX_LOOPS_CAP, Settings
 from reviewpilot.llm import call_model
-from reviewpilot.models import SEVERITY_ORDER, Finding
+from reviewpilot.models import SEVERITY_ORDER, Finding, apply_floor
 from reviewpilot.prompts import load_prompt
+
+# Rejected findings from these agents are kept as possible issues for a human to decide.
+KEEP_REJECTED_FROM = ("correctness", "security")
 
 
 def format_findings(candidates: list[Finding]) -> str:
@@ -70,26 +73,36 @@ def make_judge_node(model, model_name: str):
             return {**done, "errors": [error], "usage": [result.usage]}
         verdict = result.parsed
 
-        # Findings the judge did not decide on are dropped (the judge favors dropping).
+        # Findings the judge did not decide on count as rejected (the judge favors dropping).
         pending = {f.id: f for f in candidates}
-        accepted = []
+        accepted, rejected = [], []
         for d in verdict.decisions:
             finding = pending.pop(d.finding_id, None)
-            if finding is None or d.decision == "reject":
+            if finding is None:
                 continue
+            if d.decision == "reject":
+                rejected.append((finding, d.reason or "rejected without a reason"))
+                continue
+            severity = finding.severity
             if d.final_severity:
-                finding = finding.model_copy(update={"severity": d.final_severity})
+                severity = d.final_severity
             elif d.decision == "downgrade":
-                finding = finding.model_copy(
-                    update={"severity": _one_level_lower(finding.severity)}
-                )
-            accepted.append(finding)
+                severity = _one_level_lower(finding.severity)
+            severity = apply_floor(severity, finding.category)  # judge can raise, never lower
+            accepted.append(finding.model_copy(update={"severity": severity}))
+        rejected += [(f, "the judge gave no decision") for f in pending.values()]
+        possible = [
+            {"finding": f, "reason": reason}
+            for f, reason in rejected
+            if f.agent in KEEP_REJECTED_FROM
+        ]
 
         retry = allowed_retries(verdict, candidates, accepted, state["route"])
         usage = {**result.usage, "judged": len(candidates), "accepted": len(accepted)}
         return {
             "accepted": accepted,
             "judged": candidates,
+            "possible_issues": possible,
             "round": rnd + 1,
             "retry_agents": retry,
             "judge_feedback": {a: verdict.feedback_for(a) for a in retry},

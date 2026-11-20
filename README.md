@@ -19,13 +19,19 @@ cp .env.example .env   # fill in ANTHROPIC_API_KEY and GITHUB_TOKEN
 Review a real PR with Claude and print the result (needs `ANTHROPIC_API_KEY`, nothing posted):
 
 ```bash
-uv run python -m reviewpilot --repo owner/name --pr 12 --dry-run
+uv run python -m reviewpilot --repo owner/name --pr 12
+```
+
+Post it to the PR (needs `GITHUB_TOKEN` with pull requests read and write):
+
+```bash
+uv run python -m reviewpilot --repo owner/name --pr 12 --post
 ```
 
 Run the whole review graph with a fake model (no Anthropic key, no cost):
 
 ```bash
-uv run python -m reviewpilot --repo owner/name --pr 12 --dry-run --fake
+uv run python -m reviewpilot --repo owner/name --pr 12 --fake
 ```
 
 Print only the numbered diff:

@@ -40,6 +40,22 @@ LANE_CATEGORIES: dict[str, tuple[str, ...]] = {
         "maintainability",
     ),
 }
+# Minimum severity by category, applied in code after the judge. The judge may raise a severity
+# but never lower it below this floor. Every correctness category is a crash or a wrong result.
+SEVERITY_FLOOR: dict[str, Severity] = {
+    "injection": "critical",
+    "secret_exposure": "critical",  # hardcoded secrets and secrets written to logs
+    **{category: "major" for category in LANE_CATEGORIES["correctness"]},
+}
+
+
+def apply_floor(severity: Severity, category: str) -> Severity:
+    floor = SEVERITY_FLOOR.get(category)
+    if floor is None:
+        return severity
+    return min(severity, floor, key=SEVERITY_ORDER.index)
+
+
 Category = Literal[
     "bug",
     "logic",

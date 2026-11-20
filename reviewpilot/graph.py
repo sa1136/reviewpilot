@@ -10,7 +10,7 @@ from reviewpilot.diff import build_file_diffs
 from reviewpilot.github import GitHubClient
 from reviewpilot.judge import make_judge_node, make_router
 from reviewpilot.llm import ModelFactory, real_model_factory
-from reviewpilot.output import format_summary, plan_comments
+from reviewpilot.output import format_summary, inline_preview, plan_comments
 from reviewpilot.router import route
 from reviewpilot.state import ReviewState, initial_state
 from reviewpilot.validate import validate
@@ -36,18 +36,15 @@ def build_graph(
     github=None,
     dry_run: bool = True,
 ):
-    """`github` is anything with get_pull_request and list_files (a GitHubClient by default)."""
+    """`github` is anything with get_pull_request and list_files, plus post_review when
+    dry_run is False (a GitHubClient by default). dry_run=True never writes to GitHub."""
     model_factory = model_factory or real_model_factory(settings)
+    github = github or GitHubClient(settings.github_token, settings.github_api_url)
     enabled = settings.reviewers()
 
     def fetch_pr(state: ReviewState) -> dict:
-        if github is not None:
-            pr = github.get_pull_request(state["repo"], state["pr_number"])
-            files = github.list_files(state["repo"], state["pr_number"])
-        else:
-            with GitHubClient(settings.github_token, settings.github_api_url) as gh:
-                pr = gh.get_pull_request(state["repo"], state["pr_number"])
-                files = gh.list_files(state["repo"], state["pr_number"])
+        pr = github.get_pull_request(state["repo"], state["pr_number"])
+        files = github.list_files(state["repo"], state["pr_number"])
         diffs, skipped = build_file_diffs(
             files, settings.skip_globs, settings.max_files, settings.max_patch_chars
         )
@@ -74,16 +71,39 @@ def build_graph(
         accepted = [] if status == "failed" else state["accepted"]
         plan = plan_comments(accepted, state["files"], settings)
         summary = format_summary(state, plan, status)
+        posted = None
         if dry_run:
-            print(summary)
+            print(inline_preview(plan) + "\n\n" + summary)
         else:
-            print("Posting to GitHub arrives in Stage 5. Printing instead:\n" + summary)
+            result = github.post_review(
+                state["repo"], state["pr_number"], state["head_sha"], plan.inline, summary
+            )
+            posted = {
+                "skipped_review": result.skipped_review,
+                "review_url": result.review_url,
+                "summary_url": result.summary_url,
+                "summary_created": result.summary_created,
+                "posted_inline": len(result.posted_inline),
+                "moved_to_summary": len(result.moved_to_summary),
+            }
+            if result.skipped_review:
+                print(f"Review for {state['head_sha'][:7]} already posted; skipped it.")
+            else:
+                print(f"Review: {result.review_url} ({len(result.posted_inline)} inline)")
+            if result.moved_to_summary:
+                print(
+                    f"{len(result.moved_to_summary)} comments rejected by GitHub, moved to summary"
+                )
+            verb = "created" if result.summary_created else "updated"
+            print(f"Summary {verb}: {result.summary_url}")
         return {
             "summary": summary,
             "status": status,
             "inline": plan.inline,
             "nits": plan.nits,
             "overflow": plan.overflow,
+            "untested": plan.untested,
+            "posted": posted,
         }
 
     graph = StateGraph(ReviewState)

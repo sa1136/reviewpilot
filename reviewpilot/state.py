@@ -21,6 +21,8 @@ class ReviewState(TypedDict):
     accepted: Annotated[list[Finding], operator.add]  # confirmed or downgraded by the judge
     judged: Annotated[list[Finding], operator.add]  # everything the judge decided on, all rounds
     dropped: Annotated[list[dict], operator.add]  # {"finding", "round", "reason"} from validate
+    # correctness / security findings the judge rejected, kept for a human: {"finding", "reason"}
+    possible_issues: Annotated[list[dict], operator.add]
     errors: Annotated[list[dict], operator.add]  # {"node", "round", "error"}
     usage: Annotated[list[dict], operator.add]  # per call: node, round, model, tokens, ms, cost
 
@@ -35,6 +37,8 @@ class ReviewState(TypedDict):
     inline: list[Finding]  # post_review: findings that become inline comments
     nits: list[Finding]  # post_review: below min_inline_severity, summary only
     overflow: list[Finding]  # post_review: over the max_comments budget, summary only
+    untested: list[Finding]  # post_review: missing test findings, one summary line
+    posted: dict | None  # post_review: what was written to GitHub (None in a dry run)
     status: str  # success | partial | failed
     started_at: float  # time.time() when the run began, for the footer
 
@@ -52,6 +56,7 @@ def initial_state(repo: str, pr_number: int) -> ReviewState:
         accepted=[],
         judged=[],
         dropped=[],
+        possible_issues=[],
         errors=[],
         usage=[],
         candidates=[],
@@ -64,6 +69,8 @@ def initial_state(repo: str, pr_number: int) -> ReviewState:
         inline=[],
         nits=[],
         overflow=[],
+        untested=[],
+        posted=None,
         status="",
         started_at=time.time(),
     )

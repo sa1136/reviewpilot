@@ -1,8 +1,9 @@
 """Command line entry point.
 
-python -m reviewpilot --repo owner/name --pr N --dry-run          # real Claude review, printed
-python -m reviewpilot --repo owner/name --pr N --dry-run --fake   # full graph, fake model
-python -m reviewpilot --repo owner/name --pr N --diff-only        # just the numbered diff
+python -m reviewpilot --repo owner/name --pr N              # real review, printed (dry run)
+python -m reviewpilot --repo owner/name --pr N --post       # real review, posted to the PR
+python -m reviewpilot --repo owner/name --pr N --fake       # full graph, fake model, printed
+python -m reviewpilot --repo owner/name --pr N --diff-only  # just the numbered diff
 """
 
 import argparse
@@ -16,12 +17,23 @@ from reviewpilot.github import GitHubClient
 from reviewpilot.graph import build_graph, run_review
 from reviewpilot.llm import demo_fake_factory, real_model_factory
 
+POST_TOKEN_HELP = """--post needs GITHUB_TOKEN (set it in .env).
+The token needs, on the target repository:
+  - Pull requests: Read and write  (read the PR, post the review and the summary comment)
+  - Metadata: Read                 (granted automatically for fine-grained tokens)
+A classic token needs the `repo` scope (or `public_repo` for public repositories)."""
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="reviewpilot", description="Review a GitHub PR.")
     parser.add_argument("--repo", required=True, help="owner/name")
     parser.add_argument("--pr", required=True, type=int, help="pull request number")
-    parser.add_argument("--dry-run", action="store_true", help="print instead of posting")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="print instead of posting (the default)"
+    )
+    parser.add_argument(
+        "--post", action="store_true", help="post the review and summary to the PR on GitHub"
+    )
     parser.add_argument(
         "--fake", action="store_true", help="use a fake model (no Anthropic key, no LLM cost)"
     )
@@ -53,6 +65,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     settings = Settings.from_env()
 
+    if args.post and (args.dry_run or args.fake or args.diff_only):
+        print("--post cannot be combined with --dry-run, --fake or --diff-only.", file=sys.stderr)
+        return 2
+    if args.post and not settings.github_token:
+        print(POST_TOKEN_HELP, file=sys.stderr)
+        return 2
     if not (args.fake or args.diff_only or settings.anthropic_api_key):
         print("ANTHROPIC_API_KEY is not set (add it to .env), or use --fake.", file=sys.stderr)
         return 2
@@ -63,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.diff_only:
                 print_diff(gh, settings, args.repo, args.pr)
                 return 0
-            graph = build_graph(settings, factory, github=gh, dry_run=args.dry_run)
+            graph = build_graph(settings, factory, github=gh, dry_run=not args.post)
             result = run_review(graph, args.repo, args.pr)
     except httpx.HTTPStatusError as exc:
         print(f"GitHub API error: {exc.response.status_code} {exc.request.url}", file=sys.stderr)

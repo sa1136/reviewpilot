@@ -8,6 +8,10 @@ Line numbers are new side lines, as shown in ReviewPilot's numbered diff.
 A finding counts as a catch if it is on the listed line (or the alternate line) and describes the
 same problem. Expected route: correctness, security, quality (code changed).
 
+**Missing test rule (from Stage 5):** missing test findings are never inline comments. They are
+grouped into one summary line, "New functions without tests: a, b, c". A planted missing test
+bug counts as caught if its function name appears in that line.
+
 ## Planted issues
 
 | # | Issue | File | Line | Alt line | Agent | Expected severity |

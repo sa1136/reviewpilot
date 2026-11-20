@@ -305,7 +305,7 @@ def test_router_runs_only_routed_agents_and_records_reasons():
     assert result["route_reasons"]["quality"] == "docs only PR"
     assert c.calls == s.calls == []
     assert len(q.calls) == 1
-    assert "Route: quality\n- correctness: skipped: docs only PR" in result["summary"]
+    assert "**Route:** quality\n- correctness: skipped: docs only PR" in result["summary"]
 
 
 def test_retry_feedback_reaches_agent_in_feedback_block_with_file_prompt():
@@ -414,5 +414,69 @@ def test_out_of_lane_is_listed_in_the_summary_and_nits_stay_out_of_inline():
 
     assert result["inline"] == []
     assert [f.title for f in result["nits"]] == ["Name x is vague"]
-    assert "Nits:\n- app.py:2 Name x is vague" in result["summary"]
-    assert "out of lane: app.py:3 Crashes on zero" in result["summary"]
+    assert "### Nits\n- `app.py:2` Name x is vague" in result["summary"]
+    assert "Dropped as out of lane: `app.py:3` Crashes on zero (quality)" in result["summary"]
+
+
+def test_severity_floor_after_the_judge():
+    from reviewpilot.models import apply_floor
+
+    assert apply_floor("minor", "range_check") == "major"  # crash or wrong result: at least major
+    assert apply_floor("critical", "bug") == "critical"  # the judge may raise
+    assert apply_floor("major", "injection") == "critical"
+    assert apply_floor("minor", "secret_exposure") == "critical"
+    assert apply_floor("nit", "naming") == "nit"  # no floor for quality
+
+    c = agent_says("Divides by zero")
+    j = FakeModel(verdict([{"decision": "downgrade", "final_severity": "minor"}]))
+    result = run({"correctness": c, "judge": j}, Settings(num_agents=1))
+    assert [f.severity for f in result["accepted"]] == ["major"]
+
+
+def test_rejected_correctness_and_security_become_possible_issues():
+    c = agent_says("Divides by zero")
+    s = agent_says("Token in logs")
+    q = agent_says("Vague name")
+
+    def respond(msgs):
+        ids = ids_shown(msgs)  # order: correctness, security, quality
+        return JudgeVerdict(
+            decisions=[
+                FindingDecision(finding_id=ids[0], decision="reject", reason="x is never 0"),
+                FindingDecision(finding_id=ids[2], decision="reject", reason="taste"),
+            ]  # security finding gets no decision at all
+        )
+
+    result = run({"correctness": c, "security": s, "quality": q, "judge": FakeModel(respond)})
+
+    possible = {p["finding"].title: p["reason"] for p in result["possible_issues"]}
+    assert possible == {
+        "Divides by zero": "x is never 0",
+        "Token in logs": "the judge gave no decision",
+    }
+    assert result["accepted"] == []
+    summary = result["summary"]
+    assert "### Possible issues (judge was not sure)" in summary
+    assert "Divides by zero (correctness). Judge: x is never 0" in summary
+    assert "Vague name" not in summary  # quality rejects drop silently
+
+
+def test_missing_test_findings_are_one_summary_line_never_inline():
+    patch = "@@ -0,0 +1,2 @@\n+def total(items):\n+    return sum(items)"
+    github = FakeGitHub([{"filename": "calc.py", "status": "added", "patch": patch}])
+    untested = Finding(
+        file="calc.py",
+        line=1,
+        severity="minor",
+        category="missing_test",
+        title="total has no test",
+        body="b",
+        evidence="def total(items):",
+        confidence=0.9,
+    )
+    q = FakeModel([AgentOutput(findings=[untested])])
+    result = run({"quality": q, "judge": FakeModel(judge())}, Settings(num_agents=2), github)
+
+    assert result["inline"] == []
+    assert [f.title for f in result["untested"]] == ["total has no test"]
+    assert "### Tests\nNew functions without tests: total" in result["summary"]
