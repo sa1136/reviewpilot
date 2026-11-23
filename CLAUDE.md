@@ -191,9 +191,31 @@ The checkpointer is what lets the graph stop at approval and pick up later, even
 - **SSE** (`GET /reviews/{id}/events`): replays the log after `Last-Event-ID` (header) or from
   the start, then follows the run live (polls the log every 0.2 s), keepalive comment every 15 s,
   closes when the review is posted or failed. Optional `?until=type1,type2` closes after one of
-  those event types (used by curl scripts and tests). Browsers' EventSource cannot send an
-  Authorization header, so with `REVIEWPILOT_API_TOKEN` set the Stage 8 UI should read the stream
-  with fetch (or we add a query token then).
+  those event types (used by curl scripts and tests). The web UI reads it with fetch (not
+  EventSource) so it controls Last-Event-ID, reconnects and backoff.
+- **Web UI** (`web/`, Next.js 16 App Router, TypeScript strict, Tailwind 4, Cache Components on):
+  3 routes, `/`, `/reviews/[id]`, `/history`; pages are client components fed by `/api/*`.
+  `app/api/[...path]/route.ts` proxies an allowlist of API paths to `REVIEWPILOT_API_URL`, adds
+  `Authorization` from `REVIEWPILOT_API_TOKEN` on the server (never in the browser) and passes SSE
+  through unbuffered. Types come from the API's OpenAPI schema (`npm run gen:api` into
+  `src/lib/api-types.ts`). Live state is a pure reducer (`lib/review-reducer.ts`): snapshot first,
+  then events after its `last_event_id`; events at or below the last applied id are ignored.
+  `useReviewStream` reconnects with backoff (0.5 to 8 s), stops on posted or error, and refetches
+  the snapshot for totals after awaiting_approval, posted and error. Decisions sent are only the
+  items the person touched; Approve all never touches possible issues. Light and dark mode via a
+  `.dark` class set before paint (saved choice, else system). `usePathname` must sit under
+  Suspense (Cache Components). Keys j/k/a/r/e/p in the approval panel.
+- **Snapshot extras for the UI:** `rounds` (validate kept/dropped, judge confirmed/rejected,
+  retrying), `files`, `skipped_files`, `started_at`, `review_seconds`, all derived from the event
+  log in `runner.timeline()`. Pending items now carry `category`, `code` (the evidence line) and
+  `suggestion`.
+- **Demo mode** (`REVIEWPILOT_DEMO=1`, `reviewpilot/demo.py`): `DemoGitHub` serves the fixture PR
+  (`reviewpilot/fixtures/demo_pr4.json`, built from the real PR #4 run) for any repo and number
+  and records posts instead of sending them; fake models replay that run's findings, judge
+  decisions and token counts, sleeping the real latency times `REVIEWPILOT_DEMO_DELAY_SCALE`
+  (0.3; tests use 0). Costs are priced with the fixture's model (Haiku). Demo uses its own
+  databases (`.reviewpilot/demo-*.db`), needs no keys, can "post" without `GITHUB_TOKEN`, and
+  `/health` reports `demo: true` (the UI shows a badge).
 - **Repo location:** `~/code/reviewpilot` (outside iCloud). The sandbox clone is at
   `~/code/reviewpilot-sandbox`.
 - **Holdout discipline:** PR #2 (`evals/planted/pr2.md`) is never used for tuning. Tune on PR #1.
@@ -254,7 +276,9 @@ reviewpilot/                # the engine (Python)
 api/          FastAPI: main.py (endpoints), runner.py (runs, events, snapshots), store.py
               (history + event log), schemas.py (request and response models)
 scripts/      demo_api.sh: curl walkthrough of the API
-web/          Next.js + TypeScript UI                                   (Stage 8, not created yet)
+reviewpilot/demo.py  demo mode: fixture PR, replayed model answers, fake poster
+web/          Next.js UI: src/app (routes + /api proxy), src/components, src/lib (typed client,
+              SSE parser, reducer, stream hook, decisions), e2e/ (Playwright, demo API)
 evals/        planted bug answer keys; LangSmith dataset and evaluators (Stage 9)
 tests/
 docs/         action plans
@@ -289,9 +313,11 @@ docs/         action plans
   streams graph updates over SSE, GET pending comments, POST decisions to resume, review history.
   Done: `scripts/demo_api.sh` started, streamed, approved and posted sandbox PR #4 with curl
   (21.6 s to awaiting_approval, 3 of 3 planted bugs, $0.004).
-- [ ] **Stage 8. Next.js UI** — paste a PR link, one live card per agent (running, done, findings
+- [x] **Stage 8. Next.js UI** — paste a PR link, one live card per agent (running, done, findings
   count); approval screen with file, line, code, severity, approve / edit / reject, post; review
-  history. Done when: a full demo in the browser from link to comments on GitHub.
+  history. Done: sandbox PR #5 reviewed for real in the browser (3 of 3 planted bugs, 30 s to
+  approval, $0.0058), 2 false positives rejected in the panel, 5 comments posted. Screenshots in
+  `docs/screenshots/`. 23 Vitest and 4 Playwright tests, both in CI.
 - [ ] **Stage 9. LangSmith evals** — 10 to 15 seeded bug PRs plus clean PRs with an answer key;
   evaluators for bugs caught, false positives, routing, trajectory, cost and latency; compare 2 vs
   3 agents, 1 vs 3 judge rounds, Haiku vs Sonnet. Done when: results table in the README.
@@ -360,4 +386,9 @@ uv run python -m reviewpilot review --repo owner/name --pr 12 --fake          # 
 uv run python -m reviewpilot review --repo owner/name --pr 12 --diff-only     # numbered diff
 uv run uvicorn api.main:app --reload                # API on :8000, docs at /docs
 scripts/demo_api.sh https://github.com/owner/repo/pull/12   # curl walkthrough of the API
+REVIEWPILOT_DEMO=1 uv run uvicorn api.main:app      # API in demo mode: no keys, no cost
+cd web && npm install && npm run dev               # web on :3000 (web/.env.local, see .env.example)
+cd web && npm run lint && npm run typecheck && npm test   # web checks
+cd web && npm run test:e2e                         # Playwright; starts a demo API on :8001 itself
+cd web && npm run gen:api                          # regenerate API types (API must be running)
 ```

@@ -127,6 +127,11 @@ class Settings:
     max_concurrent_reviews: int = 2
     cors_origins: tuple[str, ...] = ("http://localhost:3000",)
 
+    # Demo mode: fixture PR, replayed model answers, fake GitHub poster. No keys, no cost.
+    # Delays are the real run's latencies times demo_delay_scale (0 = no waiting, for tests).
+    demo: bool = False
+    demo_delay_scale: float = 0.3
+
     # API client behavior. These retries are for 429 / 5xx / network errors and are separate
     # from the judge's retry loop.
     max_output_tokens: int = 16000
@@ -150,6 +155,9 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         load_dotenv()
+        demo = os.getenv("REVIEWPILOT_DEMO", "").lower() in ("1", "true", "yes")
+        # Demo reviews get their own files, so they never mix with real review history.
+        db_prefix = ".reviewpilot/demo-" if demo else ".reviewpilot/"
         return cls(
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY") or None,
             github_token=os.getenv("GITHUB_TOKEN") or None,
@@ -162,9 +170,11 @@ class Settings:
             agent_model=os.getenv("REVIEWPILOT_AGENT_MODEL", "claude-sonnet-5-5"),
             judge_model=os.getenv("REVIEWPILOT_JUDGE_MODEL", "claude-haiku-5-5"),
             checkpointer=os.getenv("REVIEWPILOT_CHECKPOINTER", "sqlite"),
-            checkpoint_db=os.getenv("REVIEWPILOT_CHECKPOINT_DB", ".reviewpilot/checkpoints.db"),
+            checkpoint_db=os.getenv("REVIEWPILOT_CHECKPOINT_DB", f"{db_prefix}checkpoints.db"),
             database_url=os.getenv("DATABASE_URL") or None,
             api_token=os.getenv("REVIEWPILOT_API_TOKEN") or None,
-            api_db=os.getenv("REVIEWPILOT_API_DB", ".reviewpilot/api.db"),
+            api_db=os.getenv("REVIEWPILOT_API_DB", f"{db_prefix}api.db"),
             max_concurrent_reviews=_int("REVIEWPILOT_MAX_CONCURRENT_REVIEWS", 2),
+            demo=demo,
+            demo_delay_scale=float(os.getenv("REVIEWPILOT_DEMO_DELAY_SCALE", "0.3")),
         )

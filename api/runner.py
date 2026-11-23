@@ -9,6 +9,7 @@ import asyncio
 import base64
 import json
 from collections import Counter
+from datetime import datetime
 
 import httpx
 from langgraph.types import Command
@@ -150,7 +151,7 @@ class ReviewManager:
             errors = decision_errors(payload["items"], decisions)
             if errors:
                 raise ApiError(400, "; ".join(errors))
-            if post and not self.settings.github_token:
+            if post and not self.settings.github_token and not self.settings.demo:
                 raise ApiError(400, "posting needs GITHUB_TOKEN on the server")
             if post and snapshot.values.get("fake"):
                 raise ApiError(400, "this review used a fake model and cannot be posted")
@@ -246,7 +247,37 @@ class ReviewManager:
             "review_stats": values.get("review_stats") or {},
             "posted": posted_view(posted) if posted and not posted.get("dry_run") else None,
             "last_event_id": events[-1]["id"] if events else 0,
+            **timeline(events),
         }
+
+
+def timeline(events: list[dict]) -> dict:
+    """Rounds, file counts and review time from the event log (what the UI shows on reload)."""
+    rounds: dict[int, dict] = {}
+    started = reviewed = None
+    files = skipped = 0
+    for e in events:
+        data, kind = e["data"], e["type"]
+        if kind == "review_started":
+            started = started or data.get("at")
+            files, skipped = data.get("files", 0), data.get("skipped", 0)
+        elif kind == "validate_done":
+            r = rounds.setdefault(data["round"], {"round": data["round"]})
+            r |= {"kept": data.get("kept"), "dropped": data.get("dropped") or {}}
+        elif kind == "judge_round":
+            r = rounds.setdefault(data["round"], {"round": data["round"]})
+            r |= {k: data.get(k) for k in ("judged", "confirmed", "rejected")}
+            r["retrying"] = data.get("retrying") or []
+            reviewed = data.get("at")
+        elif kind == "awaiting_approval" and reviewed is None:
+            reviewed = data.get("at")
+    seconds = None
+    if started and reviewed:
+        seconds = (
+            datetime.fromisoformat(reviewed) - datetime.fromisoformat(started)
+        ).total_seconds()
+    return {"rounds": [rounds[k] for k in sorted(rounds)], "files": files,
+            "skipped_files": skipped, "started_at": started, "review_seconds": seconds}  # fmt: skip
 
 
 def agent_statuses(route: list[str], reasons: dict[str, str], events: list[dict]) -> list[dict]:

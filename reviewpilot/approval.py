@@ -216,7 +216,10 @@ def public_item(item: dict, saved: dict[str, dict]) -> dict:
         "line": f.line,
         "severity": f.severity,
         "agent": f.agent,
+        "category": f.category,
         "title": f.title,
         "body": f.body,
+        "code": f.evidence,
+        "suggestion": f.suggestion,
         "reason": item.get("reason"),
     }

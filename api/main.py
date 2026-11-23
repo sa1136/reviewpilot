@@ -10,6 +10,7 @@ import asyncio
 import re
 import secrets
 from contextlib import ExitStack, asynccontextmanager
+from dataclasses import replace
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +19,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from reviewpilot.checkpoint import open_checkpointer
 from reviewpilot.config import Settings
+from reviewpilot.demo import DemoGitHub, demo_model_factory, load_fixture
 from reviewpilot.github import GitHubClient
 from reviewpilot.llm import ModelFactory, real_model_factory
 
@@ -51,8 +53,15 @@ def create_app(
     github=None,
     model_factory: ModelFactory | None = None,
 ) -> FastAPI:
-    """Build the app. Tests pass fakes for `github` and `model_factory`."""
+    """Build the app. Tests pass fakes for `github` and `model_factory`. With settings.demo the
+    fixture PR, replayed model answers and a fake poster are used instead (no keys needed)."""
     settings = settings or Settings.from_env()
+    if settings.demo:
+        # Price the replayed calls with the model the recorded run used.
+        model = load_fixture()["model"]
+        settings = replace(settings, agent_model=model, judge_model=model)
+        github = github or DemoGitHub(delay_scale=settings.demo_delay_scale)
+        model_factory = model_factory or demo_model_factory(delay_scale=settings.demo_delay_scale)
     resources = ExitStack()
     saver = resources.enter_context(open_checkpointer(settings))
     store = Store(settings.api_db)
@@ -99,6 +108,7 @@ def create_app(
             github_configured=bool(settings.github_token),
             checkpointer=settings.checkpointer,
             auth_required=bool(settings.api_token),
+            demo=settings.demo,
         )
 
     api = APIRouter(dependencies=[Depends(require_token)])

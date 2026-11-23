@@ -15,6 +15,7 @@ class Health(BaseModel):
     github_configured: bool
     checkpointer: str
     auth_required: bool
+    demo: bool = False
 
 
 class StartReview(BaseModel):
@@ -71,8 +72,11 @@ class PendingItem(BaseModel):
     line: int | None = None
     severity: str | None = None
     agent: str | None = None
+    category: str | None = None
     title: str | None = None
     body: str | None = None
+    code: str | None = None  # the quoted code line (the finding's evidence)
+    suggestion: str | None = None
     reason: str | None = None
     text: str | None = None
 
@@ -93,6 +97,18 @@ class Posted(BaseModel):
     skipped: bool = False
 
 
+class RoundStats(BaseModel):
+    """One review round, from the validate_done and judge_round events."""
+
+    round: int
+    kept: int | None = None
+    dropped: dict[str, int] = {}
+    judged: int | None = None
+    confirmed: int | None = None
+    rejected: int | None = None
+    retrying: list[str] = []
+
+
 class ReviewSnapshot(BaseModel):
     review_id: str
     thread_id: str
@@ -111,6 +127,11 @@ class ReviewSnapshot(BaseModel):
     usage: Usage
     review_stats: dict[str, int] = {}
     posted: Posted | None = None
+    rounds: list[RoundStats] = []
+    files: int = 0
+    skipped_files: int = 0
+    started_at: str | None = None
+    review_seconds: float | None = None  # fetch to judge done; excludes waiting for a human
     last_event_id: int
 
 

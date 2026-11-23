@@ -1,0 +1,185 @@
+{
+  "source": "Real Stage 7 run of sa1136/reviewpilot-sandbox#4 (2026-11-23, Haiku 5.5): findings, judge decisions and token counts are copied from it.",
+  "model": "claude-haiku-5-5",
+  "pr": {
+    "title": "Add coupon helpers for the checkout page",
+    "body": "Adds coupon code normalization, a welcome code check, a list of codes a customer has used, and loading coupon terms by name, with tests.",
+    "head_sha": "ff8fbbdb8fceade6bc0b6e74522e225f47b49084",
+    "head_ref": "feature/coupons",
+    "base_ref": "main"
+  },
+  "files": [
+    {
+      "filename": "coupons.py",
+      "status": "added",
+      "patch": "@@ -0,0 +1,27 @@\n+\"\"\"Coupon codes for the checkout page.\"\"\"\n+\n+import os\n+\n+COUPON_DIR = \"coupons\"\n+\n+\n+def normalize_code(code: str) -> str:\n+    \"\"\"Trim and upper case a coupon code typed by a customer.\"\"\"\n+    return code.strip().upper()\n+\n+\n+def is_welcome_code(code: str) -> bool:\n+    \"\"\"True for the one time welcome coupon.\"\"\"\n+    return normalize_code(code) is \"WELCOME10\"\n+\n+\n+def remember_code(code: str, seen: list[str] = []) -> list[str]:\n+    \"\"\"Add a code to the codes this customer has used and return the list.\"\"\"\n+    seen.append(normalize_code(code))\n+    return seen\n+\n+\n+def load_coupon_terms(name: str) -> str:\n+    \"\"\"Read the terms text for a coupon; the name comes from the URL.\"\"\"\n+    with open(os.path.join(COUPON_DIR, name + \".txt\")) as f:\n+        return f.read()"
+    },
+    {
+      "filename": "tests/test_coupons.py",
+      "status": "added",
+      "patch": "@@ -0,0 +1,19 @@\n+import coupons\n+\n+\n+def test_normalize_code():\n+    assert coupons.normalize_code(\"  welcome10 \") == \"WELCOME10\"\n+\n+\n+def test_is_welcome_code_rejects_other_codes():\n+    assert not coupons.is_welcome_code(\"SPRING5\")\n+\n+\n+def test_remember_code():\n+    assert coupons.remember_code(\"a1\") == [\"A1\"]\n+\n+\n+def test_load_coupon_terms(tmp_path, monkeypatch):\n+    (tmp_path / \"spring.txt\").write_text(\"Valid in April.\")\n+    monkeypatch.setattr(coupons, \"COUPON_DIR\", str(tmp_path))\n+    assert coupons.load_coupon_terms(\"spring\") == \"Valid in April.\""
+    }
+  ],
+  "agents": {
+    "correctness": [
+      {
+        "file": "coupons.py",
+        "line": 15,
+        "severity": "major",
+        "category": "bug",
+        "title": "Identity comparison used instead of equality for coupon code",
+        "body": "The `is` operator checks object identity, not string value. Whether this returns True for \"WELCOME10\" depends on string interning, so a customer's valid welcome code can be rejected. It should use `==`.",
+        "suggestion": "return normalize_code(code) == \"WELCOME10\"",
+        "evidence": "    return normalize_code(code) is \"WELCOME10\"",
+        "confidence": 0.9
+      },
+      {
+        "file": "coupons.py",
+        "line": 18,
+        "severity": "major",
+        "category": "bug",
+        "title": "Mutable default list shares state across calls",
+        "body": "The default `seen=[]` is created once and reused, so codes remembered for one customer appear in every later call that omits the argument. This leaks used-code history between customers and makes results depend on call order.",
+        "suggestion": "def remember_code(code: str, seen: list[str] | None = None) -> list[str]:\n    if seen is None:\n        seen = []\n    seen.append(normalize_code(code))\n    return seen",
+        "evidence": "def remember_code(code: str, seen: list[str] = []) -> list[str]:",
+        "confidence": 0.9
+      }
+    ],
+    "security": [
+      {
+        "file": "coupons.py",
+        "line": 26,
+        "severity": "major",
+        "category": "injection",
+        "title": "Path traversal via coupon name taken from the URL",
+        "body": "The name comes from the URL and is joined into a file path without validation, so values like '../' can read any file ending in .txt outside COUPON_DIR. The .txt suffix limits what can be read but does not stop the traversal.",
+        "suggestion": "Accept only a whitelisted or strictly pattern-matched name (for example [A-Za-z0-9_-]+), or resolve the path and confirm it stays inside COUPON_DIR before opening.",
+        "evidence": "with open(os.path.join(COUPON_DIR, name + \".txt\")) as f:",
+        "confidence": 0.8
+      },
+      {
+        "file": "coupons.py",
+        "line": 18,
+        "severity": "minor",
+        "category": "auth",
+        "title": "Mutable default list shares used codes across customers",
+        "body": "The default list is created once and reused by every call, so one customer's used codes can appear in another customer's result. This can expose or mix customer coupon history.",
+        "suggestion": "Use seen: list[str] | None = None and create a new list inside the function when it is None, or pass the per-customer list explicitly.",
+        "evidence": "def remember_code(code: str, seen: list[str] = []) -> list[str]:",
+        "confidence": 0.4
+      }
+    ],
+    "quality": [
+      {
+        "file": "tests/test_coupons.py",
+        "line": 8,
+        "severity": "major",
+        "category": "weak_test",
+        "title": "Welcome code test never checks that WELCOME10 is accepted",
+        "body": "The only test for is_welcome_code checks a rejected code, so it would still pass if the function always returned False. The positive case is what the new behavior is for, and leaving it out lets a broken comparison ship unnoticed.",
+        "suggestion": "Add an assertion that coupons.is_welcome_code(\"welcome10 \") is True alongside the rejection check.",
+        "evidence": "def test_is_welcome_code_rejects_other_codes():",
+        "confidence": 0.8
+      },
+      {
+        "file": "tests/test_coupons.py",
+        "line": 12,
+        "severity": "minor",
+        "category": "weak_test",
+        "title": "remember_code test only covers a single call",
+        "body": "The test calls remember_code once on an empty list, so it cannot detect that the default list is shared across calls. A second call that checks accumulation would expose the shared state.",
+        "suggestion": "Call remember_code twice in the test and assert the list holds both codes, passing an explicit list or checking state across calls.",
+        "evidence": "def test_remember_code():",
+        "confidence": 0.55
+      },
+      {
+        "file": "coupons.py",
+        "line": 18,
+        "severity": "major",
+        "category": "maintainability",
+        "title": "Mutable default argument makes remember_code share state across callers",
+        "body": "The default list is created once when the function is defined, so every call without seen= appends to the same list. The name and docstring suggest a per-customer list, which this does not provide, and the next reader will likely misread it.",
+        "suggestion": "Use seen: list[str] | None = None and create a new list inside the function when it is None, or make the caller pass the customer's list explicitly.",
+        "evidence": "def remember_code(code: str, seen: list[str] = []) -> list[str]:",
+        "confidence": 0.5
+      }
+    ]
+  },
+  "judge": [
+    {
+      "agent": "correctness",
+      "file": "coupons.py",
+      "line": 15,
+      "title": "Identity comparison used instead of equality for coupon code",
+      "decision": "confirm",
+      "final_severity": "critical",
+      "reason": "Real defect on an added line; evidence matches."
+    },
+    {
+      "agent": "correctness",
+      "file": "coupons.py",
+      "line": 18,
+      "title": "Mutable default list shares state across calls",
+      "decision": "confirm",
+      "final_severity": "critical",
+      "reason": "Real defect on an added line; evidence matches."
+    },
+    {
+      "agent": "security",
+      "file": "coupons.py",
+      "line": 26,
+      "title": "Path traversal via coupon name taken from the URL",
+      "decision": "confirm",
+      "final_severity": "critical",
+      "reason": "Real defect on an added line; evidence matches."
+    },
+    {
+      "agent": "quality",
+      "file": "tests/test_coupons.py",
+      "line": 8,
+      "title": "Welcome code test never checks that WELCOME10 is accepted",
+      "decision": "confirm",
+      "final_severity": "minor",
+      "reason": "Real defect on an added line; evidence matches."
+    },
+    {
+      "agent": "quality",
+      "file": "tests/test_coupons.py",
+      "line": 12,
+      "title": "remember_code test only covers a single call",
+      "decision": "reject",
+      "final_severity": null,
+      "reason": "A single-call test is thin but not wrong; not worth a comment."
+    }
+  ],
+  "usage": {
+    "correctness": {
+      "input_tokens": 3020,
+      "output_tokens": 1020,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 2075,
+      "latency_ms": 8067
+    },
+    "security": {
+      "input_tokens": 3007,
+      "output_tokens": 1350,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 2064,
+      "latency_ms": 9749
+    },
+    "quality": {
+      "input_tokens": 3008,
+      "output_tokens": 1493,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 2064,
+      "latency_ms": 10182
+    },
+    "judge": {
+      "input_tokens": 3146,
+      "output_tokens": 1217,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 1493,
+      "latency_ms": 10021
+    }
+  }
+}

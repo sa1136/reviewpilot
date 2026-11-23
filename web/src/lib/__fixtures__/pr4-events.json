@@ -1,0 +1,247 @@
+{
+ "review_id": "c2ExMTM2L3Jldmlld3BpbG90LXNhbmRib3gjNEBmZjhmYmJkYjhmY2VhZGU2YmMwYjZlNzQ1MjJlMjI1ZjQ3YjQ5MDg0",
+ "note": "Real event log of the Stage 7 API run of sandbox PR #4 (2026-11-23).",
+ "events": [
+  {
+   "id": 1,
+   "type": "review_started",
+   "data": {
+    "type": "review_started",
+    "at": "2026-11-23T14:10:35+00:00",
+    "repo": "sa1136/reviewpilot-sandbox",
+    "pr": 4,
+    "sha": "ff8fbbdb8fceade6bc0b6e74522e225f47b49084",
+    "title": "Add coupon helpers for the checkout page",
+    "files": 2,
+    "skipped": 0
+   }
+  },
+  {
+   "id": 2,
+   "type": "route_decided",
+   "data": {
+    "type": "route_decided",
+    "at": "2026-11-23T14:10:35+00:00",
+    "agents": [
+     "correctness",
+     "security",
+     "quality"
+    ],
+    "reasons": {
+     "correctness": "code changed (1 file)",
+     "security": "code changed (1 file)",
+     "quality": "code changed (1 file)"
+    }
+   }
+  },
+  {
+   "id": 3,
+   "type": "agent_started",
+   "data": {
+    "type": "agent_started",
+    "at": "2026-11-23T14:10:35+00:00",
+    "agent": "correctness",
+    "round": 1
+   }
+  },
+  {
+   "id": 4,
+   "type": "agent_started",
+   "data": {
+    "type": "agent_started",
+    "at": "2026-11-23T14:10:35+00:00",
+    "agent": "security",
+    "round": 1
+   }
+  },
+  {
+   "id": 5,
+   "type": "agent_started",
+   "data": {
+    "type": "agent_started",
+    "at": "2026-11-23T14:10:35+00:00",
+    "agent": "quality",
+    "round": 1
+   }
+  },
+  {
+   "id": 6,
+   "type": "agent_finished",
+   "data": {
+    "type": "agent_finished",
+    "at": "2026-11-23T14:10:43+00:00",
+    "agent": "correctness",
+    "round": 1,
+    "findings": 2,
+    "latency_ms": 8067
+   }
+  },
+  {
+   "id": 7,
+   "type": "agent_finished",
+   "data": {
+    "type": "agent_finished",
+    "at": "2026-11-23T14:10:44+00:00",
+    "agent": "security",
+    "round": 1,
+    "findings": 2,
+    "latency_ms": 9749
+   }
+  },
+  {
+   "id": 8,
+   "type": "agent_finished",
+   "data": {
+    "type": "agent_finished",
+    "at": "2026-11-23T14:10:45+00:00",
+    "agent": "quality",
+    "round": 1,
+    "findings": 3,
+    "latency_ms": 10182
+   }
+  },
+  {
+   "id": 9,
+   "type": "validate_done",
+   "data": {
+    "type": "validate_done",
+    "at": "2026-11-23T14:10:45+00:00",
+    "round": 1,
+    "kept": 5,
+    "dropped": {
+     "duplicate": 2
+    }
+   }
+  },
+  {
+   "id": 10,
+   "type": "judge_round",
+   "data": {
+    "type": "judge_round",
+    "at": "2026-11-23T14:10:55+00:00",
+    "round": 1,
+    "judged": 5,
+    "confirmed": 4,
+    "rejected": 1,
+    "retrying": [],
+    "latency_ms": 10021
+   }
+  },
+  {
+   "id": 11,
+   "type": "awaiting_approval",
+   "data": {
+    "type": "awaiting_approval",
+    "at": "2026-11-23T14:10:55+00:00",
+    "status": "success",
+    "items": [
+     {
+      "id": "i1",
+      "kind": "inline",
+      "default": "approve",
+      "action": "approve",
+      "body_edit": null,
+      "file": "coupons.py",
+      "line": 15,
+      "severity": "critical",
+      "agent": "correctness",
+      "title": "Identity comparison used instead of equality for coupon code",
+      "body": "The `is` operator checks object identity, not string value. Whether this returns True for \"WELCOME10\" depends on string interning, so a customer's valid welcome code can be rejected. It should use `==`.",
+      "reason": null
+     },
+     {
+      "id": "i2",
+      "kind": "inline",
+      "default": "approve",
+      "action": "approve",
+      "body_edit": null,
+      "file": "coupons.py",
+      "line": 18,
+      "severity": "critical",
+      "agent": "correctness",
+      "title": "Mutable default list shares state across calls",
+      "body": "The default `seen=[]` is created once and reused, so codes remembered for one customer appear in every later call that omits the argument. This leaks used-code history between customers and makes results depend on call order.",
+      "reason": null
+     },
+     {
+      "id": "i3",
+      "kind": "inline",
+      "default": "approve",
+      "action": "approve",
+      "body_edit": null,
+      "file": "coupons.py",
+      "line": 26,
+      "severity": "critical",
+      "agent": "security",
+      "title": "Path traversal via coupon name taken from the URL",
+      "body": "The name comes from the URL and is joined into a file path without validation, so values like '../' can read any file ending in .txt outside COUPON_DIR. The .txt suffix limits what can be read but does not stop the traversal.",
+      "reason": null
+     },
+     {
+      "id": "i4",
+      "kind": "inline",
+      "default": "approve",
+      "action": "approve",
+      "body_edit": null,
+      "file": "tests/test_coupons.py",
+      "line": 8,
+      "severity": "minor",
+      "agent": "quality",
+      "title": "Welcome code test never checks that WELCOME10 is accepted",
+      "body": "The only test for is_welcome_code checks a rejected code, so it would still pass if the function always returned False. The positive case is what the new behavior is for, and leaving it out lets a broken comparison ship unnoticed.",
+      "reason": null
+     }
+    ],
+    "would_post_inline": [
+     {
+      "file": "coupons.py",
+      "line": 15,
+      "severity": "critical",
+      "title": "Identity comparison used instead of equality for coupon code"
+     },
+     {
+      "file": "coupons.py",
+      "line": 18,
+      "severity": "critical",
+      "title": "Mutable default list shares state across calls"
+     },
+     {
+      "file": "coupons.py",
+      "line": 26,
+      "severity": "critical",
+      "title": "Path traversal via coupon name taken from the URL"
+     },
+     {
+      "file": "tests/test_coupons.py",
+      "line": 8,
+      "severity": "minor",
+      "title": "Welcome code test never checks that WELCOME10 is accepted"
+     }
+    ]
+   }
+  },
+  {
+   "id": 12,
+   "type": "posting",
+   "data": {
+    "type": "posting",
+    "at": "2026-11-23T14:11:06+00:00",
+    "inline_comments": 4
+   }
+  },
+  {
+   "id": 13,
+   "type": "posted",
+   "data": {
+    "type": "posted",
+    "at": "2026-11-23T14:11:09+00:00",
+    "dry_run": false,
+    "review_url": "https://github.com/sa1136/reviewpilot-sandbox/pull/4#pullrequestreview-6023124655",
+    "summary_url": "https://github.com/sa1136/reviewpilot-sandbox/pull/4#issuecomment-7103609323",
+    "inline_comments": 4,
+    "moved_to_summary": 0,
+    "skipped": false
+   }
+  }
+ ]
+}
