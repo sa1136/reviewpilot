@@ -121,6 +121,12 @@ class Settings:
     checkpoint_db: str = ".reviewpilot/checkpoints.db"
     database_url: str | None = None  # for postgres
 
+    # HTTP API (api/). api_token: if set, every endpoint except /health needs it as a Bearer token.
+    api_token: str | None = None
+    api_db: str = ".reviewpilot/api.db"  # review history and the event log
+    max_concurrent_reviews: int = 2
+    cors_origins: tuple[str, ...] = ("http://localhost:3000",)
+
     # API client behavior. These retries are for 429 / 5xx / network errors and are separate
     # from the judge's retry loop.
     max_output_tokens: int = 16000
@@ -158,4 +164,7 @@ class Settings:
             checkpointer=os.getenv("REVIEWPILOT_CHECKPOINTER", "sqlite"),
             checkpoint_db=os.getenv("REVIEWPILOT_CHECKPOINT_DB", ".reviewpilot/checkpoints.db"),
             database_url=os.getenv("DATABASE_URL") or None,
+            api_token=os.getenv("REVIEWPILOT_API_TOKEN") or None,
+            api_db=os.getenv("REVIEWPILOT_API_DB", ".reviewpilot/api.db"),
+            max_concurrent_reviews=_int("REVIEWPILOT_MAX_CONCURRENT_REVIEWS", 2),
         )

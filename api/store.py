@@ -1,0 +1,121 @@
+"""Small SQLite store next to the checkpoints: review history plus an append only event log per
+review (for SSE replay). Thread safe: the engine runs in worker threads."""
+
+import json
+import sqlite3
+import threading
+from datetime import UTC, datetime
+from pathlib import Path
+
+SCHEMA = """
+create table if not exists reviews (
+    review_id text primary key,
+    thread_id text not null,
+    repo text not null,
+    pr integer not null,
+    title text not null default '',
+    sha text not null,
+    status text not null,
+    created_at text not null,
+    updated_at text not null,
+    counts text not null default '{}',
+    cost_usd real not null default 0,
+    error text,
+    posted text
+);
+create table if not exists events (
+    review_id text not null,
+    seq integer not null,
+    type text not null,
+    data text not null,
+    primary key (review_id, seq)
+);
+"""
+
+
+def now() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+class Store:
+    def __init__(self, path: str):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._lock = threading.Lock()
+        with self._lock:
+            self._conn.executescript(SCHEMA)
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def create_review(self, review_id, thread_id, repo, pr, sha, status, title="") -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "insert or ignore into reviews (review_id, thread_id, repo, pr, title, sha, "
+                "status, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (review_id, thread_id, repo, pr, title, sha, status, now(), now()),
+            )
+
+    def update_review(self, review_id: str, **fields) -> None:
+        for key in ("counts", "posted"):
+            if key in fields and not isinstance(fields[key], str):
+                fields[key] = json.dumps(fields[key])
+        fields["updated_at"] = now()
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        with self._lock, self._conn:
+            self._conn.execute(
+                f"update reviews set {cols} where review_id = ?", (*fields.values(), review_id)
+            )
+
+    def get_review(self, review_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "select * from reviews where review_id = ?", (review_id,)
+            ).fetchone()
+        return _review(row) if row else None
+
+    def list_reviews(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute("select * from reviews order by created_at desc").fetchall()
+        return [_review(r) for r in rows]
+
+    def add_event(self, review_id: str, event_type: str, data: dict, **review_fields) -> int:
+        """Append an event. `review_fields` update the review row in the same transaction, so
+        a reader never sees a final event without its status (or the other way round)."""
+        for key in ("counts", "posted"):
+            if key in review_fields and not isinstance(review_fields[key], str):
+                review_fields[key] = json.dumps(review_fields[key])
+        with self._lock, self._conn:
+            if review_fields:
+                review_fields["updated_at"] = now()
+                cols = ", ".join(f"{k} = ?" for k in review_fields)
+                self._conn.execute(
+                    f"update reviews set {cols} where review_id = ?",
+                    (*review_fields.values(), review_id),
+                )
+            (last,) = self._conn.execute(
+                "select coalesce(max(seq), 0) from events where review_id = ?", (review_id,)
+            ).fetchone()
+            seq = last + 1
+            payload = {"type": event_type, "at": now(), **data}
+            self._conn.execute(
+                "insert into events (review_id, seq, type, data) values (?, ?, ?, ?)",
+                (review_id, seq, event_type, json.dumps(payload)),
+            )
+        return seq
+
+    def events_after(self, review_id: str, after: int = 0) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "select seq, type, data from events where review_id = ? and seq > ? order by seq",
+                (review_id, after),
+            ).fetchall()
+        return [{"id": r["seq"], "type": r["type"], "data": json.loads(r["data"])} for r in rows]
+
+
+def _review(row: sqlite3.Row) -> dict:
+    out = dict(row)
+    out["counts"] = json.loads(out["counts"] or "{}")
+    out["posted"] = json.loads(out["posted"]) if out["posted"] else None
+    return out

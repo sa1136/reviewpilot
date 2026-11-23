@@ -12,6 +12,7 @@ from reviewpilot.agents import make_agent_node
 from reviewpilot.approval import make_approval_node
 from reviewpilot.config import MAX_LOOPS_CAP, Settings
 from reviewpilot.diff import build_file_diffs
+from reviewpilot.events import emit
 from reviewpilot.github import GitHubClient
 from reviewpilot.judge import make_judge_node, make_router
 from reviewpilot.llm import ModelFactory, real_model_factory
@@ -63,6 +64,8 @@ def build_graph(
         diffs, skipped = build_file_diffs(
             files, settings.skip_globs, settings.max_files, settings.max_patch_chars
         )
+        emit("review_started", repo=state["repo"], pr=state["pr_number"], sha=pr.head_sha,
+             title=pr.title, files=len(diffs), skipped=len(skipped))  # fmt: skip
         return {
             "head_sha": pr.head_sha,
             "pr_title": pr.title,
@@ -74,6 +77,7 @@ def build_graph(
 
     def router(state: ReviewState) -> dict:
         agents, reasons = route([f.path for f in state["files"]], enabled)
+        emit("route_decided", agents=agents, reasons=reasons)
         return {"route": agents, "route_reasons": reasons}
 
     def fan_out(state: ReviewState):
@@ -95,8 +99,11 @@ def build_graph(
         )
         if dry_run:
             print(inline_preview(plan) + "\n\n" + summary)
+            emit("posted", dry_run=True, review_url=None, summary_url=None,
+                 inline_comments=len(plan.inline), skipped=False)  # fmt: skip
             return {"summary": summary, "posted": {"dry_run": True}}
 
+        emit("posting", inline_comments=len(plan.inline))
         result = github.post_review(
             state["repo"],
             state["pr_number"],
@@ -113,6 +120,15 @@ def build_graph(
             "posted_inline": len(result.posted_inline),
             "moved_to_summary": len(result.moved_to_summary),
         }
+        emit(
+            "posted",
+            dry_run=False,
+            review_url=result.review_url,
+            summary_url=result.summary_url,
+            inline_comments=len(result.posted_inline),
+            moved_to_summary=len(result.moved_to_summary),
+            skipped=result.skipped,
+        )
         if result.skipped:
             print(f"Already posted for {state['head_sha'][:7]} on GitHub; wrote nothing.")
         else:

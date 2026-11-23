@@ -34,6 +34,16 @@ uv run python -m reviewpilot approve --repo owner/name --pr 12 --post
 Other options: `review --fake` (no API key, no cost), `review --diff-only`, `review --fresh`,
 `review --auto-approve` (approve and post in one go), `approve -i` (decide item by item).
 
+## API
+
+```bash
+uv run uvicorn api.main:app --reload       # http://127.0.0.1:8000/docs
+scripts/demo_api.sh https://github.com/owner/repo/pull/12
+```
+
+Start a review with `POST /reviews`, follow it live on `GET /reviews/{id}/events` (Server Sent
+Events), then approve and post with `POST /reviews/{id}/decisions`.
+
 ## Development
 
 ```bash

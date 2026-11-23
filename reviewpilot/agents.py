@@ -2,6 +2,7 @@
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from reviewpilot.events import emit
 from reviewpilot.llm import call_model
 from reviewpilot.models import FileDiff
 from reviewpilot.prompts import agent_system_prompt
@@ -49,17 +50,23 @@ def make_agent_node(name: str, model, model_name: str):
 
     def agent_node(state: dict) -> dict:
         rnd = state["round"]
+        emit("agent_started", agent=name, round=rnd)
         try:
             result = call_model(model, build_agent_messages(name, state), name, rnd, model_name)
         except Exception as exc:  # fail soft: record it, the other agents' work survives
             error = {"node": name, "round": rnd, "error": f"{type(exc).__name__}: {exc}"}
+            emit("agent_failed", agent=name, round=rnd, error=error["error"])
             return {"errors": [error]}
         if result.error:
             error = {"node": name, "round": rnd, "error": result.error}
+            emit("agent_failed", agent=name, round=rnd, error=result.error,
+                 latency_ms=result.usage["latency_ms"])  # fmt: skip
             return {"errors": [error], "usage": [result.usage]}
         findings = [
             f.model_copy(update={"agent": name, "round": rnd}) for f in result.parsed.findings
         ]
+        emit("agent_finished", agent=name, round=rnd, findings=len(findings),
+             latency_ms=result.usage["latency_ms"])  # fmt: skip
         return {"findings": findings, "usage": [result.usage]}
 
     agent_node.__name__ = name

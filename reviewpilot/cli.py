@@ -16,7 +16,7 @@ import sys
 import httpx
 from langgraph.types import Command
 
-from reviewpilot.approval import check_decision
+from reviewpilot.approval import decision_errors
 from reviewpilot.checkpoint import fresh_thread_id, list_threads, open_checkpointer, thread_id
 from reviewpilot.config import Settings
 from reviewpilot.diff import build_file_diffs
@@ -182,11 +182,7 @@ def build_decisions(args, items: list[dict]) -> tuple[list[dict], list[str]]:
         key, sep, text = raw.partition("=")
         decisions[key.strip()] = {"id": key.strip(), "action": "edit", "body": text if sep else ""}
 
-    errors = [f"{i}: no such item" for i in decisions if i not in by_id]
-    for d in decisions.values():
-        if d["id"] in by_id and (problem := check_decision(by_id[d["id"]], d)):
-            errors.append(problem)
-    return list(decisions.values()), errors
+    return list(decisions.values()), decision_errors(items, list(decisions.values()))
 
 
 def interactive_decisions(items: list[dict], ask=input) -> list[dict]:

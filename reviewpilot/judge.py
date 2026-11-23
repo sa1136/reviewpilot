@@ -7,6 +7,7 @@ from langgraph.types import Send
 
 from reviewpilot.agents import cached_system, untrusted_pr_block
 from reviewpilot.config import MAX_LOOPS_CAP, Settings
+from reviewpilot.events import emit
 from reviewpilot.llm import call_model
 from reviewpilot.models import SEVERITY_ORDER, Finding, apply_floor
 from reviewpilot.prompts import load_prompt
@@ -68,6 +69,7 @@ def make_judge_node(model, model_name: str):
             "reviewed_at": time.time(),
         }
         if not candidates:
+            emit("judge_round", round=rnd, judged=0, confirmed=0, rejected=0, retrying=[])
             return done
 
         try:
@@ -75,9 +77,14 @@ def make_judge_node(model, model_name: str):
                 model, build_judge_messages(state, candidates), "judge", rnd, model_name
             )
         except Exception as exc:  # judge failed: nothing from this round is accepted
-            return {**done, "errors": [{"node": "judge", "round": rnd, "error": repr(exc)}]}
+            error = {"node": "judge", "round": rnd, "error": repr(exc)}
+            emit("judge_round", round=rnd, judged=len(candidates), confirmed=0, rejected=0,
+                 retrying=[], error=error["error"])  # fmt: skip
+            return {**done, "errors": [error]}
         if result.error:
             error = {"node": "judge", "round": rnd, "error": result.error}
+            emit("judge_round", round=rnd, judged=len(candidates), confirmed=0, rejected=0,
+                 retrying=[], error=result.error)  # fmt: skip
             return {**done, "errors": [error], "usage": [result.usage]}
         verdict = result.parsed
 
@@ -107,6 +114,15 @@ def make_judge_node(model, model_name: str):
 
         retry = allowed_retries(verdict, candidates, accepted, state["route"])
         usage = {**result.usage, "judged": len(candidates), "accepted": len(accepted)}
+        emit(
+            "judge_round",
+            round=rnd,
+            judged=len(candidates),
+            confirmed=len(accepted),
+            rejected=len(candidates) - len(accepted),
+            retrying=retry,
+            latency_ms=result.usage["latency_ms"],
+        )
         return {
             "accepted": accepted,
             "judged": candidates,

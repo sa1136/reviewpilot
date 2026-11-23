@@ -15,6 +15,7 @@ With post=False the decisions are saved and the graph pauses again, showing what
 from langgraph.types import Command, interrupt
 
 from reviewpilot.config import Settings
+from reviewpilot.events import emit
 from reviewpilot.models import Finding
 from reviewpilot.output import (
     CommentPlan,
@@ -69,6 +70,20 @@ def check_decision(item: dict, decision: dict) -> str | None:
     if action == "edit" and not (decision.get("body") or "").strip():
         return f"{item['id']}: edit needs new text"
     return None
+
+
+def decision_errors(items: list[dict], decisions: list[dict]) -> list[str]:
+    """Problems with a list of decisions against the pending items (empty list = all valid).
+    `items` may be pending items or the public items from the interrupt payload."""
+    by_id = {i["id"]: i for i in items}
+    errors = []
+    for d in decisions:
+        item = by_id.get(d.get("id"))
+        if item is None:
+            errors.append(f"{d.get('id')}: no such item")
+        elif problem := check_decision(item, d):
+            errors.append(problem)
+    return errors
 
 
 def apply_decisions(
@@ -134,18 +149,22 @@ def make_approval_node(settings: Settings):
         would, would_possible, _, log = apply_decisions(items, saved, settings)
         preview = format_summary(state, would, status, possible=would_possible,
                                  stats=review_stats(log))  # fmt: skip
-        answer = interrupt(
-            {
-                "thread_id": state.get("thread_id", ""),
-                "status": status,
-                "items": [public_item(i, saved) for i in items],
-                "would_post_inline": [
-                    {"file": f.file, "line": f.line, "severity": f.severity, "title": f.title}
-                    for f in would.inline
-                ],
-                "summary_preview": preview,
-            }
-        )
+        payload = {
+            "thread_id": state.get("thread_id", ""),
+            "status": status,
+            "items": [public_item(i, saved) for i in items],
+            "would_post_inline": [
+                {"file": f.file, "line": f.line, "severity": f.severity, "title": f.title}
+                for f in would.inline
+            ],
+            "summary_preview": preview,
+        }
+        # This node runs again when resumed, so this also fires once per resume; the API
+        # drops that stale copy. A failed review never waits for approval in the API.
+        if status != "failed":
+            emit("awaiting_approval", status=status, items=payload["items"],
+                 would_post_inline=payload["would_post_inline"])  # fmt: skip
+        answer = interrupt(payload)
 
         answer = answer or {}
         by_id = {i["id"]: i for i in items}

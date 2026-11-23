@@ -13,8 +13,10 @@ Rules, in order (a finding is dropped at the first rule it fails, with the reaso
 """
 
 import re
+from collections import Counter
 
 from reviewpilot.config import AVAILABLE_AGENTS
+from reviewpilot.events import emit
 from reviewpilot.models import LANE_CATEGORIES, FileDiff, Finding
 from reviewpilot.router import is_test
 
@@ -118,4 +120,6 @@ def validate(state: dict) -> dict:
             continue
         kept.append(f)
 
+    reasons = Counter(d["reason"].split(":")[0] for d in dropped)
+    emit("validate_done", round=rnd, kept=len(kept), dropped=dict(reasons))
     return {"candidates": kept, "dropped": dropped}

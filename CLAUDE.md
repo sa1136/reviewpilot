@@ -176,6 +176,24 @@ The checkpointer is what lets the graph stop at approval and pick up later, even
   longer drift from the inline comments.
 - **Footer time** is frozen when the judge finishes (`reviewed_at`), so it excludes the time a
   review waits for a human.
+- **Events from inside nodes** (`reviewpilot/events.py`): `emit(type, **data)` uses LangGraph's
+  stream writer; under plain `invoke()` it is a no-op and outside a run it does nothing. The
+  approval node runs again on resume, so its awaiting_approval event repeats once per resume; the
+  API drops that stale copy. A failed review does not emit awaiting_approval.
+- **API** (`api/`, FastAPI): wraps the same graph (no engine logic duplicated). `runner.py`
+  runs a review in a worker thread with `stream_mode="custom"` and writes every event to an
+  append only log in `.reviewpilot/api.db` (with the review history table). Final events
+  (awaiting_approval, posted, error) are written in the same transaction as the review status,
+  so the stream and the status never disagree. One active run per thread id; at most
+  `max_concurrent_reviews` (2) running, extra starts get 429. A run that throws is marked failed
+  with an error event and never posts. Keys and tokens are scrubbed from every event and
+  snapshot (tested). review_id = URL safe base64 of the thread id (no padding).
+- **SSE** (`GET /reviews/{id}/events`): replays the log after `Last-Event-ID` (header) or from
+  the start, then follows the run live (polls the log every 0.2 s), keepalive comment every 15 s,
+  closes when the review is posted or failed. Optional `?until=type1,type2` closes after one of
+  those event types (used by curl scripts and tests). Browsers' EventSource cannot send an
+  Authorization header, so with `REVIEWPILOT_API_TOKEN` set the Stage 8 UI should read the stream
+  with fetch (or we add a query token then).
 - **Repo location:** `~/code/reviewpilot` (outside iCloud). The sandbox clone is at
   `~/code/reviewpilot-sandbox`.
 - **Holdout discipline:** PR #2 (`evals/planted/pr2.md`) is never used for tuning. Tune on PR #1.
@@ -233,7 +251,9 @@ reviewpilot/                # the engine (Python)
   graph.py    StateGraph wiring, fetch_pr, router node, post_review
   cli.py      python -m reviewpilot --repo o/r --pr 12 --dry-run
   prompts/    correctness.md security.md quality.md judge.md agent_rules.md
-api/          FastAPI: start review, SSE stream, approve, post          (Stage 7, not created yet)
+api/          FastAPI: main.py (endpoints), runner.py (runs, events, snapshots), store.py
+              (history + event log), schemas.py (request and response models)
+scripts/      demo_api.sh: curl walkthrough of the API
 web/          Next.js + TypeScript UI                                   (Stage 8, not created yet)
 evals/        planted bug answer keys; LangSmith dataset and evaluators (Stage 9)
 tests/
@@ -265,9 +285,10 @@ docs/         action plans
   per comment; SqliteSaver for dev, PostgresSaver behind an env flag; thread_id `repo#pr@sha`; CLI
   approval mode. Done: sandbox PR #3 reviewed in one process, approved (1 reject, 1 edit) and
   posted from new processes; reviewing it again printed "already posted" and wrote nothing.
-- [ ] **Stage 7. FastAPI backend** — `POST /reviews` starts a run, `GET /reviews/{id}/events`
+- [x] **Stage 7. FastAPI backend** — `POST /reviews` starts a run, `GET /reviews/{id}/events`
   streams graph updates over SSE, GET pending comments, POST decisions to resume, review history.
-  Done when: a curl session can start, watch, approve and post a review.
+  Done: `scripts/demo_api.sh` started, streamed, approved and posted sandbox PR #4 with curl
+  (21.6 s to awaiting_approval, 3 of 3 planted bugs, $0.004).
 - [ ] **Stage 8. Next.js UI** — paste a PR link, one live card per agent (running, done, findings
   count); approval screen with file, line, code, severity, approve / edit / reject, post; review
   history. Done when: a full demo in the browser from link to comments on GitHub.
@@ -276,6 +297,39 @@ docs/         action plans
   3 agents, 1 vs 3 judge rounds, Haiku vs Sonnet. Done when: results table in the README.
 - [ ] **Stage 10. Bonus** — GitHub Action auto mode, deploy (Vercel plus a hosted API and
   Postgres), GitHub App for a bot identity.
+
+## API reference (for Stage 8)
+
+Run: `uv run uvicorn api.main:app --reload` (docs at http://127.0.0.1:8000/docs, OpenAPI schema
+at /openapi.json for generating TypeScript types). CORS allows http://localhost:3000. If
+`REVIEWPILOT_API_TOKEN` is set, every endpoint except /health needs `Authorization: Bearer <token>`.
+
+| Method and path | Body | Returns |
+|---|---|---|
+| `GET /health` | | `Health`: ok, anthropic_configured, github_configured, checkpointer, auth_required |
+| `POST /reviews` | `StartReview` {pr_url, fresh} | 202 `ReviewRef` (started) or 200 `ReviewRef` (existing: running, awaiting_approval, posted, failed); 400 bad URL, 404 PR not found, 429 too many running |
+| `GET /reviews` | | `ReviewListItem[]`: repo, pr, title, sha, status, created_at, updated_at, counts by severity, cost_usd, error |
+| `GET /reviews/{id}` | | `ReviewSnapshot`: status, error, route, route_reasons, agents (queued, running, done, failed, skipped with findings and latency_ms), pending items (when awaiting), summary_preview, counts, usage, review_stats, posted, last_event_id |
+| `GET /reviews/{id}/events` | header `Last-Event-ID`, query `until` | `text/event-stream` |
+| `POST /reviews/{id}/decisions` | `Decisions` {decisions: [{id, action: approve, reject, edit, promote, body}], post} | 202 `DecisionsAccepted` {review_id, status}; 400 invalid decision or no GITHUB_TOKEN to post, 409 not awaiting approval |
+
+Review status: running, awaiting_approval, posting, posted, failed.
+
+SSE events (every `data` is JSON with `type` and `at`; ids increase per review):
+
+| Event | Data |
+|---|---|
+| review_started | repo, pr, sha, title, files, skipped |
+| route_decided | agents, reasons (per agent, including skipped) |
+| agent_started | agent, round |
+| agent_finished | agent, round, findings, latency_ms |
+| agent_failed | agent, round, error (latency_ms if a call was made) |
+| validate_done | round, kept, dropped (count by reason) |
+| judge_round | round, judged, confirmed, rejected, retrying (agents), latency_ms, error (if the judge failed) |
+| awaiting_approval | status, items (pending items, same shape as `PendingItem`), would_post_inline |
+| posting | inline_comments |
+| posted | review_url, summary_url, inline_comments, moved_to_summary, skipped, dry_run |
+| error | message |
 
 ## Risks
 
@@ -304,4 +358,6 @@ uv run python -m reviewpilot review --repo owner/name --pr 12 --auto-approve  # 
 uv run python -m reviewpilot review --repo owner/name --pr 12 --fresh         # new thread
 uv run python -m reviewpilot review --repo owner/name --pr 12 --fake          # fake model
 uv run python -m reviewpilot review --repo owner/name --pr 12 --diff-only     # numbered diff
+uv run uvicorn api.main:app --reload                # API on :8000, docs at /docs
+scripts/demo_api.sh https://github.com/owner/repo/pull/12   # curl walkthrough of the API
 ```
