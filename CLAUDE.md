@@ -218,7 +218,8 @@ The checkpointer is what lets the graph stop at approval and pick up later, even
   `/health` reports `demo: true` (the UI shows a badge).
 - **Repo location:** `~/code/reviewpilot` (outside iCloud). The sandbox clone is at
   `~/code/reviewpilot-sandbox`.
-- **Holdout discipline:** PR #2 (`evals/planted/pr2.md`) is never used for tuning. Tune on PR #1.
+- **Holdout discipline:** PRs #6 to #15 (Stage 9 holdout split) are never used for tuning. #1 and
+  #2 were tuned on, #3 to #5 were seen while building. Pick configs from holdout numbers only.
 - **Stage 4 results** (3 runs each, Haiku): PR #1 6/6 bugs in all runs, 2 false positives (both
   nits, none inline), no retries, $0.0046 avg. PR #2 holdout 4/6 in all runs, 0 false positives,
   $0.0031 avg; misses were the judge rejecting a negative stock bug (2 of 3 runs) and one finding
@@ -246,11 +247,34 @@ The checkpointer is what lets the graph stop at approval and pick up later, even
   is reported as confirmed); `partial` if any other error; else `success`.
 - **CLI:** real review needs `ANTHROPIC_API_KEY`; `--fake` runs the whole graph with demo fakes;
   `--diff-only` prints the numbered diff.
-- **Models:** defaults are `claude-sonnet-5-5` (agents) and `claude-haiku-5-5` (judge). During
-  development `.env` sets both to Haiku to save credits.
+- **Models:** default is `claude-haiku-5-5` for every role (changed from Sonnet agents in Stage 9:
+  on the holdout, Sonnet for correctness cost 5x with more false positives and no recall gain).
+  `REVIEWPILOT_MODEL_<ROLE>` (e.g. `REVIEWPILOT_MODEL_CORRECTNESS`) overrides one role
+  (`Settings.model_overrides`).
+- **Tracing** (Stage 9): `LANGSMITH_TRACING=true`, `LANGSMITH_PROJECT=reviewpilot` and
+  `LANGSMITH_API_KEY` in `.env`. `config_for(thread_id)` puts repo, pr, sha and thread_id in the run
+  metadata (every node inherits it) and names the run `review owner/repo#pr`; each model call adds
+  route and round (`llm.trace_config`, merged with the inherited metadata) and is named
+  `<node> round <n>`. `tests/conftest.py` forces tracing off, so tests never reach LangSmith.
+- **Evals** (`evals/`, Stage 9): answer keys are the JSON block at the end of each
+  `evals/planted/prN.md` (bugs with file, line, alt_line, kind, expected_agent, function for
+  missing tests; clean_files; neutral_files, where comments count neither way; expected_route).
+  LangSmith dataset `reviewpilot-planted` with splits tuned / seen / holdout. The target runs the
+  graph through the judge, auto approves the defaults and never posts (`ReadOnlyGitHub` has no
+  post method, dry run graph). Evaluators are plain code: a bug is caught by an inline comment in
+  the same file within 1 line of its line or alt line, or for a missing test by its function on
+  the tests line. `evals/run.py` refuses an experiment whose padded estimate would take total spend
+  (sum of saved runs) past $1.50. Every run is saved to `evals/results/<exp>.jsonl`;
+  `evals.run report` rewrites the tables in `evals/RESULTS.md` between its markers.
+- **Stage 9 results** (3 runs each): holdout A (default) 28 of 28 bugs every run, 4 false
+  positives on clean PRs over 3 runs (all on the tests only PR), 12 extra comments on buggy PRs,
+  $0.0024 and 11 s per review. B (no security agent) misses 7 of 8 security bugs; C (no retries)
+  is within noise of A; D (Sonnet correctness) 5x cost, more noise. Recall is saturated: the
+  planted bugs are easy. Total eval spend $0.91.
 - **Ruff** excludes `*.md` (it would otherwise reformat code sketches in Markdown).
-- **Sandbox repo:** `sa1136/reviewpilot-sandbox`. Planted bug PRs have answer keys in
-  `evals/planted/` (PR #1: `evals/planted/pr1.md`); these feed the Stage 9 LangSmith dataset.
+- **Sandbox repo:** `sa1136/reviewpilot-sandbox`. 15 planted PRs (#1 to #15) with answer keys in
+  `evals/planted/prN.md`; they feed the LangSmith dataset. #13 (code), #14 (docs only) and #15
+  (tests only) are clean.
 
 ## Repo structure
 
@@ -279,7 +303,8 @@ scripts/      demo_api.sh: curl walkthrough of the API
 reviewpilot/demo.py  demo mode: fixture PR, replayed model answers, fake poster
 web/          Next.js UI: src/app (routes + /api proxy), src/components, src/lib (typed client,
               SSE parser, reducer, stream hook, decisions), e2e/ (Playwright, demo API)
-evals/        planted bug answer keys; LangSmith dataset and evaluators (Stage 9)
+evals/        planted/ answer keys, keys.py, dataset.py (LangSmith), target.py, scoring.py,
+              run.py (experiments, budget), report.py, results/*.jsonl, RESULTS.md
 tests/
 docs/         action plans
 .github/workflows/  ci.yml; reviewpilot.yml auto mode                  (Stage 10)
@@ -318,9 +343,11 @@ docs/         action plans
   history. Done: sandbox PR #5 reviewed for real in the browser (3 of 3 planted bugs, 30 s to
   approval, $0.0058), 2 false positives rejected in the panel, 5 comments posted. Screenshots in
   `docs/screenshots/`. 23 Vitest and 4 Playwright tests, both in CI.
-- [ ] **Stage 9. LangSmith evals** — 10 to 15 seeded bug PRs plus clean PRs with an answer key;
+- [x] **Stage 9. LangSmith evals** — 10 to 15 seeded bug PRs plus clean PRs with an answer key;
   evaluators for bugs caught, false positives, routing, trajectory, cost and latency; compare 2 vs
-  3 agents, 1 vs 3 judge rounds, Haiku vs Sonnet. Done when: results table in the README.
+  3 agents, 1 vs 3 judge rounds, Haiku vs Sonnet. Done: 10 holdout PRs (#6 to #15, 3 clean, 3 not
+  Python), experiments A to D x 3 reps in LangSmith, results in `evals/RESULTS.md` and the README;
+  default set to Haiku everywhere. Holdout A: 84 of 84 bugs over 3 runs, $0.0024 per review.
 - [ ] **Stage 10. Bonus** — GitHub Action auto mode, deploy (Vercel plus a hosted API and
   Postgres), GitHub App for a bot identity.
 
@@ -391,4 +418,8 @@ cd web && npm install && npm run dev               # web on :3000 (web/.env.loca
 cd web && npm run lint && npm run typecheck && npm test   # web checks
 cd web && npm run test:e2e                         # Playwright; starts a demo API on :8001 itself
 cd web && npm run gen:api                          # regenerate API types (API must be running)
+uv run python -m evals.run dataset                 # sync the LangSmith dataset from the answer keys
+uv run python -m evals.run estimate                # eval cost estimate, nothing runs
+uv run python -m evals.run experiment A            # 15 PRs x 3 reps (A to D), never posts
+uv run python -m evals.run report                  # rewrite the tables in evals/RESULTS.md
 ```

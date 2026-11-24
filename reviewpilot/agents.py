@@ -45,6 +45,11 @@ def build_agent_messages(name: str, state: dict) -> list:
     return [cached_system(agent_system_prompt(name)), HumanMessage("\n\n".join(parts))]
 
 
+def call_meta(state: dict) -> dict:
+    """Tracing metadata for a model call (repo and pr come from the run's config)."""
+    return {"sha": state.get("head_sha", ""), "route": list(state.get("route", []))}
+
+
 def make_agent_node(name: str, model, model_name: str):
     """Node that returns ONLY findings, usage and errors (all append reducers)."""
 
@@ -52,7 +57,9 @@ def make_agent_node(name: str, model, model_name: str):
         rnd = state["round"]
         emit("agent_started", agent=name, round=rnd)
         try:
-            result = call_model(model, build_agent_messages(name, state), name, rnd, model_name)
+            result = call_model(
+                model, build_agent_messages(name, state), name, rnd, model_name, call_meta(state)
+            )
         except Exception as exc:  # fail soft: record it, the other agents' work survives
             error = {"node": name, "round": rnd, "error": f"{type(exc).__name__}: {exc}"}
             emit("agent_failed", agent=name, round=rnd, error=error["error"])

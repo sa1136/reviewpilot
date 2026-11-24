@@ -81,11 +81,25 @@ def usage_entry(node: str, rnd: int, model: str, raw: Any, latency_ms: int) -> d
     }
 
 
-def call_model(model: Any, messages: list, node: str, rnd: int, model_name: str) -> CallResult:
+def trace_config(node: str, rnd: int, metadata: dict | None) -> dict:
+    """Config for one model call: the run's inherited metadata (repo, pr, sha) plus this call's
+    (route, round), so every LangSmith trace of an LLM call can be filtered by them."""
+    from langchain_core.runnables.config import ensure_config
+
+    inherited = ensure_config().get("metadata", {})
+    return {
+        "run_name": f"{node} round {rnd}",
+        "metadata": {**inherited, **(metadata or {}), "round": rnd},
+    }
+
+
+def call_model(
+    model: Any, messages: list, node: str, rnd: int, model_name: str, metadata: dict | None = None
+) -> CallResult:
     """Invoke a model once and record usage. Exceptions propagate; unusable output is reported
     as an error with usage still recorded (the tokens were spent)."""
     start = time.perf_counter()
-    result = model.invoke(messages)
+    result = model.invoke(messages, config=trace_config(node, rnd, metadata))
     latency_ms = round((time.perf_counter() - start) * 1000)
 
     if isinstance(result, dict) and "raw" in result:
@@ -121,9 +135,11 @@ class FakeModel:
     def __init__(self, responses: list | Callable[[list], Any]):
         self._responses = responses if callable(responses) else list(responses)
         self.calls: list[list] = []
+        self.configs: list[dict | None] = []
 
-    def invoke(self, messages: list) -> Any:
+    def invoke(self, messages: list, config: dict | None = None) -> Any:
         self.calls.append(messages)
+        self.configs.append(config)
         if callable(self._responses):
             response = self._responses(messages)
         elif self._responses:

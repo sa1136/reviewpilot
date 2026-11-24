@@ -24,7 +24,7 @@ Single source of truth for building ReviewPilot in Claude Code. CLAUDE.md holds 
 | 6 | Human approval and checkpointer | Done | interrupt() approval, SQLite checkpoints, survives restart, PR #3 |
 | 7 | FastAPI backend | Done | SSE with replay, 21.6 s to approval, $0.004 per review, PR #4, 117 tests |
 | 8 | Next.js UI | Done | PR #5 in the browser: 3 of 3 bugs, 30 s to approval, $0.0058, 2 false positives rejected by hand |
-| 9 | LangSmith evals, README, results | Next | |
+| 9 | LangSmith evals, README, results | Done | Holdout (10 unseen PRs, 3 runs): 84 of 84 bugs, 16 false positives (82% precision), $0.0024 per review. Default now Haiku everywhere |
 | 10 | Deploy, GitHub Action auto mode, GitHub App | Optional | |
 
 ## Decisions log (do not undo without asking)
@@ -48,6 +48,11 @@ Single source of truth for building ReviewPilot in Claude Code. CLAUDE.md holds 
 * Demo mode replays the real PR #4 run (findings, judge decisions, tokens) with scaled delays, on separate databases. Any PR link works in demo.
 * The web proxy forwards only an allowlist of API paths.
 * Keep LangGraph and LangChain off the RESOLVE and Proliant resume bullets. ReviewPilot is a personal project.
+* Default models are Haiku 5.5 for every role, picked from the Stage 9 holdout (Sonnet for correctness: 5x cost, more false positives, no recall gain). `REVIEWPILOT_MODEL_<ROLE>` overrides one role.
+* Configs are picked from holdout numbers only (#6 to #15). Never tune prompts on the holdout PRs.
+* Evals never post: read only GitHub client plus a dry run graph. Evaluators are plain code; a bug counts if an inline comment is within 1 line of its line or alt line (or its function is on the tests line). Comments on a buggy PR's test file are neutral.
+* Eval spend has a $1.50 budget enforced by `evals/run.py` (padded estimate before each experiment). Stage 9 spent $0.91.
+* Tracing metadata: repo, pr, sha on every node (from the thread id); route and round on every model call. Tests force tracing off.
 
 ## Planted PRs (sandbox: sa1136/reviewpilot-sandbox)
 
@@ -58,6 +63,16 @@ Single source of truth for building ReviewPilot in Claude Code. CLAUDE.md holds 
 | #3 | 3 bugs | Used for the approval flow |
 | #4 | 3 bugs | Used for the API demo |
 | #5 | 3 bugs | Created in Stage 8, used for the browser demo. Judge confirmed 2 false positives (one on the clean change) |
+| #6 | 4 bugs | Holdout. Python refunds: wrong refund amount, day 30 boundary, pickle, untested cancel |
+| #7 | 4 bugs | Holdout. TypeScript pricing: qty ignored, percent not divided, XSS, untested bulk discount |
+| #8 | 5 bugs | Holdout. JavaScript sessions: hardcoded secret, no expiry, indexOf > 0, missing await, untested revoke |
+| #9 | 4 bugs | Holdout. Python scheduling: slot at closing time, timedelta.seconds, unsalted MD5, untested cancel |
+| #10 | 4 bugs | Holdout. Python settings: yaml.load, bool("false"), password logged, untested reload |
+| #11 | 3 bugs | Holdout. TypeScript pagination: floor page count, slice end, unvalidated page query |
+| #12 | 4 bugs | Holdout. Python rate limit: trusts X-Forwarded-For, LIMIT + 1, retry after ignores start, untested reset |
+| #13 | clean | Holdout. Python tax helpers, fully tested |
+| #14 | clean | Holdout. Docs only (routes to quality only) |
+| #15 | clean | Holdout. Tests only for cart.py (routes to correctness and quality) |
 
 Answer keys live in `evals/planted/prN.md`. A planted missing test counts as caught if it appears in the grouped summary line.
 
@@ -180,6 +195,6 @@ Part C: GitHub App (bot identity)
 Update CLAUDE.md and docs/ROADMAP.md. Plain commit messages. Stop.
 ```
 
-## Resume bullet (fill after Stage 9)
+## Resume bullet (filled after Stage 9)
 
-Built ReviewPilot, a LangGraph code review agent where a router sends each pull request to parallel Claude sub agents, a judge loop capped in code filters findings, and human in the loop approval with checkpointing gates every comment through a streaming Next.js UI; caught X of Y planted bugs on unseen PRs in LangSmith evals at about $N per review.
+Built ReviewPilot, a LangGraph code review agent where a router sends each pull request to parallel Claude sub agents, a judge loop capped in code filters findings, and human in the loop approval with checkpointing gates every comment through a streaming Next.js UI; in LangSmith evals it caught 84 of 84 planted bugs on 10 unseen PRs over 3 runs with 16 false positives (82% precision) at about $0.0024 per review.

@@ -68,3 +68,32 @@ shown in all 3 runs.
 | 3 | 1 | 0 | 8 | 6 | 2 | 6 | 0 | 15,719 / 4,481 | 7,696 / 0 | $0.0031 | 14.1 s |
 
 Summary: 4 / 6 caught in all 3 runs, 0 false positives, $0.0031 and 13.5 s average.
+
+## Machine readable key
+
+Read by `evals/dataset.py` to build the LangSmith dataset (tuned split). Line tolerance is plus or minus 1. The test file is neutral because weak test comments are not counted either way.
+
+```json
+{
+  "pr": 2,
+  "split": "tuned",
+  "language": "Python",
+  "expected_route": [
+    "correctness",
+    "security",
+    "quality"
+  ],
+  "clean_files": [],
+  "neutral_files": [
+    "tests/test_inventory.py"
+  ],
+  "bugs": [
+    {"file": "inventory.py", "line": 18, "alt_line": 15, "kind": "range_check", "expected_agent": "correctness", "function": null},
+    {"file": "inventory.py", "line": 32, "alt_line": null, "kind": "off_by_one", "expected_agent": "correctness", "function": null},
+    {"file": "inventory.py", "line": 25, "alt_line": 24, "kind": "null_or_empty", "expected_agent": "correctness", "function": null},
+    {"file": "reports.py", "line": 14, "alt_line": 13, "kind": "injection", "expected_agent": "security", "function": null},
+    {"file": "inventory.py", "line": 40, "alt_line": null, "kind": "secret_exposure", "expected_agent": "security", "function": null},
+    {"file": "inventory.py", "line": 44, "alt_line": 46, "kind": "missing_test", "expected_agent": "quality", "function": "total_units"}
+  ]
+}
+```

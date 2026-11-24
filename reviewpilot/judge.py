@@ -5,7 +5,7 @@ import time
 from langchain_core.messages import HumanMessage
 from langgraph.types import Send
 
-from reviewpilot.agents import cached_system, untrusted_pr_block
+from reviewpilot.agents import cached_system, call_meta, untrusted_pr_block
 from reviewpilot.config import MAX_LOOPS_CAP, Settings
 from reviewpilot.events import emit
 from reviewpilot.llm import call_model
@@ -74,7 +74,12 @@ def make_judge_node(model, model_name: str):
 
         try:
             result = call_model(
-                model, build_judge_messages(state, candidates), "judge", rnd, model_name
+                model,
+                build_judge_messages(state, candidates),
+                "judge",
+                rnd,
+                model_name,
+                call_meta(state),
             )
         except Exception as exc:  # judge failed: nothing from this round is accepted
             error = {"node": "judge", "round": rnd, "error": repr(exc)}

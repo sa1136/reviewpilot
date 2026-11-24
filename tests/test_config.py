@@ -6,6 +6,8 @@ def test_defaults():
     assert (s.num_agents, s.max_retries, s.max_files, s.max_comments) == (3, 2, 40, 20)
     assert s.max_patch_chars == 12000
     assert s.effective_max_retries == 2
+    # Picked from the Stage 9 holdout evals: Haiku everywhere, 3 agents, 2 retries.
+    assert s.model_for("correctness") == s.model_for("judge") == "claude-haiku-5-5"
 
 
 def test_retries_clamped_to_hard_cap():
@@ -41,3 +43,14 @@ def test_model_for_role():
         "a",
         "j",
     ]
+
+
+def test_model_override_per_role(monkeypatch):
+    from reviewpilot.config import Settings
+
+    monkeypatch.setenv("REVIEWPILOT_AGENT_MODEL", "claude-haiku-5-5")
+    monkeypatch.setenv("REVIEWPILOT_MODEL_CORRECTNESS", "claude-sonnet-5-5")
+    settings = Settings.from_env()
+    assert settings.model_for("correctness") == "claude-sonnet-5-5"
+    assert settings.model_for("quality") == "claude-haiku-5-5"
+    assert settings.model_for("judge") == settings.judge_model

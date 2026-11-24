@@ -37,3 +37,29 @@ posted inline, each critical: coupons.py 15 (`is` comparison), 18 (mutable defau
 traversal). No false positives on clean lines. Quality added a weak test comment on
 tests/test_coupons.py 8 (the welcome test never checks WELCOME10 is accepted), not counted.
 Validate dropped 2 cross agent duplicates; the judge confirmed 4 of 5. Cost $0.0040.
+
+## Machine readable key
+
+Read by `evals/dataset.py` to build the LangSmith dataset (seen split). Line tolerance is plus or minus 1. The test file is neutral because weak test comments are not counted either way.
+
+```json
+{
+  "pr": 4,
+  "split": "seen",
+  "language": "Python",
+  "expected_route": [
+    "correctness",
+    "security",
+    "quality"
+  ],
+  "clean_files": [],
+  "neutral_files": [
+    "tests/test_coupons.py"
+  ],
+  "bugs": [
+    {"file": "coupons.py", "line": 15, "alt_line": 13, "kind": "logic", "expected_agent": "correctness", "function": null},
+    {"file": "coupons.py", "line": 18, "alt_line": 20, "kind": "bug", "expected_agent": "correctness", "function": null},
+    {"file": "coupons.py", "line": 26, "alt_line": 24, "kind": "unsafe_input", "expected_agent": "security", "function": null}
+  ]
+}
+```

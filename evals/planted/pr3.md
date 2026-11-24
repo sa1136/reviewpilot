@@ -39,3 +39,29 @@ malformed output for negative amounts" on the clean orders.py 8, was rejected by
 approval. Quality also flagged a weak free shipping test (tests/test_orders.py 14), which is not
 counted either way. Human review: 3 approved, 1 edited (line 18), 0 promoted, 1 rejected.
 Posted review: 4 inline comments; a second `review` printed "already posted" and wrote nothing.
+
+## Machine readable key
+
+Read by `evals/dataset.py` to build the LangSmith dataset (seen split). Line tolerance is plus or minus 1. The test file is neutral because weak test comments are not counted either way.
+
+```json
+{
+  "pr": 3,
+  "split": "seen",
+  "language": "Python",
+  "expected_route": [
+    "correctness",
+    "security",
+    "quality"
+  ],
+  "clean_files": [],
+  "neutral_files": [
+    "tests/test_orders.py"
+  ],
+  "bugs": [
+    {"file": "orders.py", "line": 13, "alt_line": 11, "kind": "exception", "expected_agent": "correctness", "function": null},
+    {"file": "orders.py", "line": 18, "alt_line": 17, "kind": "range_check", "expected_agent": "correctness", "function": null},
+    {"file": "orders.py", "line": 23, "alt_line": 21, "kind": "injection", "expected_agent": "security", "function": null}
+  ]
+}
+```

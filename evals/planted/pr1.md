@@ -103,3 +103,32 @@ cross agent duplicate; correctness kept).
 |---|---|---|---|---|---|---|
 | Stage 3 | 4 / 6 | 4 (0, 1, 3) | 2 | 4 | 2.0 | $0.0054 |
 | Stage 4 | 6 / 6 | 2 (0, 1, 1), none inline | 0 | 0 | 1.0 | $0.0046 |
+
+## Machine readable key
+
+Read by `evals/dataset.py` to build the LangSmith dataset (tuned split). Line tolerance is plus or minus 1. `tests/test_users.py` is a clean file here (the Stage 3 and 4 tables count comments on it as false positives).
+
+```json
+{
+  "pr": 1,
+  "split": "tuned",
+  "language": "Python",
+  "expected_route": [
+    "correctness",
+    "security",
+    "quality"
+  ],
+  "clean_files": [
+    "tests/test_users.py"
+  ],
+  "neutral_files": [],
+  "bugs": [
+    {"file": "cart.py", "line": 68, "alt_line": 69, "kind": "logic", "expected_agent": "correctness", "function": null},
+    {"file": "cart.py", "line": 75, "alt_line": null, "kind": "off_by_one", "expected_agent": "correctness", "function": null},
+    {"file": "cart.py", "line": 80, "alt_line": null, "kind": "null_or_empty", "expected_agent": "correctness", "function": null},
+    {"file": "users.py", "line": 18, "alt_line": 19, "kind": "injection", "expected_agent": "security", "function": null},
+    {"file": "users.py", "line": 5, "alt_line": 23, "kind": "secret_exposure", "expected_agent": "security", "function": null},
+    {"file": "users.py", "line": 26, "alt_line": 28, "kind": "missing_test", "expected_agent": "quality", "function": "deactivate_user"}
+  ]
+}
+```

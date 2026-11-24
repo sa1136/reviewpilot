@@ -111,8 +111,13 @@ class Settings:
     max_comments: int = 20
     min_inline_severity: str = "minor"  # nits never become inline comments
 
-    agent_model: str = "claude-sonnet-5-5"
+    # Haiku for every role: the Stage 9 holdout evals (evals/RESULTS.md) found Sonnet for
+    # correctness cost 5x with more false positives and no recall gain.
+    agent_model: str = "claude-haiku-5-5"
     judge_model: str = "claude-haiku-5-5"
+    # Per role model, e.g. {"correctness": "claude-sonnet-5-5"}; wins over agent_model and
+    # judge_model. From REVIEWPILOT_MODEL_<ROLE> (REVIEWPILOT_MODEL_CORRECTNESS=...).
+    model_overrides: dict[str, str] = field(default_factory=dict)
 
     skip_globs: tuple[str, ...] = field(default=DEFAULT_SKIP_GLOBS)
 
@@ -150,6 +155,8 @@ class Settings:
         return list(AGENTS_BY_COUNT[count])
 
     def model_for(self, role: str) -> str:
+        if role in self.model_overrides:
+            return self.model_overrides[role]
         return self.judge_model if role == "judge" else self.agent_model
 
     @classmethod
@@ -167,8 +174,13 @@ class Settings:
             max_files=_int("REVIEWPILOT_MAX_FILES", 40),
             max_patch_chars=_int("REVIEWPILOT_MAX_PATCH_CHARS", 12000),
             max_comments=_int("REVIEWPILOT_MAX_COMMENTS", 20),
-            agent_model=os.getenv("REVIEWPILOT_AGENT_MODEL", "claude-sonnet-5-5"),
+            agent_model=os.getenv("REVIEWPILOT_AGENT_MODEL", "claude-haiku-5-5"),
             judge_model=os.getenv("REVIEWPILOT_JUDGE_MODEL", "claude-haiku-5-5"),
+            model_overrides={
+                role: os.environ[f"REVIEWPILOT_MODEL_{role.upper()}"]
+                for role in (*AVAILABLE_AGENTS, "judge")
+                if os.getenv(f"REVIEWPILOT_MODEL_{role.upper()}")
+            },
             checkpointer=os.getenv("REVIEWPILOT_CHECKPOINTER", "sqlite"),
             checkpoint_db=os.getenv("REVIEWPILOT_CHECKPOINT_DB", f"{db_prefix}checkpoints.db"),
             database_url=os.getenv("DATABASE_URL") or None,

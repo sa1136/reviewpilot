@@ -2,6 +2,7 @@
 fetch_pr -> router -> (agents in parallel) -> validate -> judge -> retry, or
 approval (interrupt, human decides) -> post_review."""
 
+import re
 import uuid
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -10,6 +11,7 @@ from langgraph.types import Command, Send
 
 from reviewpilot.agents import make_agent_node
 from reviewpilot.approval import make_approval_node
+from reviewpilot.checkpoint import serializer
 from reviewpilot.config import MAX_LOOPS_CAP, Settings
 from reviewpilot.diff import build_file_diffs
 from reviewpilot.events import emit
@@ -34,14 +36,31 @@ class LazyModel:
     def __init__(self, factory: ModelFactory, role: str):
         self._factory, self._role, self._model = factory, role, None
 
-    def invoke(self, messages):
+    def invoke(self, messages, config=None):
         if self._model is None:
             self._model = self._factory(self._role)
-        return self._model.invoke(messages)
+        return self._model.invoke(messages, config=config)
+
+
+def trace_metadata(thread_id: str) -> dict:
+    """LangSmith metadata from a thread id (owner/repo#pr@sha, maybe with ~fresh-...). Every
+    node and model call in the run inherits it; model calls add route and round."""
+    match = re.match(r"^([^#]+)#(\d+)@([^~]+)", thread_id)
+    if not match:
+        return {"thread_id": thread_id}
+    repo, pr, sha = match.groups()
+    return {"repo": repo, "pr": int(pr), "sha": sha, "thread_id": thread_id}
 
 
 def config_for(thread_id: str) -> dict:
-    return {"configurable": {"thread_id": thread_id}, "recursion_limit": RECURSION_LIMIT}
+    meta = trace_metadata(thread_id)
+    name = f"review {meta['repo']}#{meta['pr']}" if "pr" in meta else "review"
+    return {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": RECURSION_LIMIT,
+        "metadata": meta,
+        "run_name": name,
+    }
 
 
 def build_graph(
@@ -161,7 +180,7 @@ def build_graph(
     graph.add_edge("validate", "judge")
     graph.add_conditional_edges("judge", make_router(settings), [*enabled, "approval"])
     graph.add_edge("post_review", END)
-    return graph.compile(checkpointer=checkpointer or InMemorySaver())
+    return graph.compile(checkpointer=checkpointer or InMemorySaver(serde=serializer()))
 
 
 def run_review(

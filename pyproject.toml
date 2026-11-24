@@ -14,6 +14,7 @@ dependencies = [
     "fastapi>=0.165.0",
     "uvicorn>=0.54.0",
     "sse-starlette>=3.7.0",
+    "langsmith>=0.15.0",
 ]
 
 [project.scripts]

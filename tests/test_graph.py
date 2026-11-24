@@ -488,3 +488,30 @@ def test_missing_test_findings_are_one_summary_line_never_inline():
     assert result["inline"] == []
     assert result["tests_line"] == "New functions without tests: total"
     assert "### Tests\nNew functions without tests: total" in result["summary"]
+
+
+def test_trace_metadata_from_thread_id():
+    from reviewpilot.graph import trace_metadata
+
+    meta = trace_metadata("o/r#12@abc123~fresh-99")
+    assert meta == {"repo": "o/r", "pr": 12, "sha": "abc123", "thread_id": "o/r#12@abc123~fresh-99"}
+    assert trace_metadata("odd") == {"thread_id": "odd"}
+    config = config_for("o/r#12@abc123")
+    assert config["metadata"]["pr"] == 12 and config["run_name"] == "review o/r#12"
+
+
+def test_every_model_call_carries_pr_sha_route_and_round_metadata():
+    q, c = agent_says_new("q"), agent_says("c1")
+    j = FakeModel(sequence(judge(retry=["quality"], decisions={"q1": "reject"}), judge()))
+    graph = build_graph(Settings(num_agents=2), fake_factory({"quality": q, "correctness": c,
+        "judge": j}), FakeGitHub())  # fmt: skip
+    run_review(graph, "o/r", 7, thread_id="o/r#7@sha1")
+
+    configs = q.configs + c.configs + j.configs
+    assert len(configs) == 5  # quality twice (retried), correctness once, judge twice
+    for config in configs:
+        meta = config["metadata"]
+        assert meta["pr"] == 7 and meta["sha"] == "sha1"
+        assert meta["route"] == ["correctness", "quality"]
+    assert [cfg["metadata"]["round"] for cfg in q.configs] == [1, 2]
+    assert q.configs[1]["run_name"] == "quality round 2"

@@ -40,3 +40,29 @@ encoding the tracking id, on the clean change). Both were rejected in the approv
 and 11, not counted). The judge sent agents back twice through `clear_miss` even after confirming
 7 of 7 in round 1; round 2 added one possible issue (shipping.py 14), round 3 only repeats.
 Review: https://github.com/sa1136/reviewpilot-sandbox/pull/5#pullrequestreview-6028191644
+
+## Machine readable key
+
+Read by `evals/dataset.py` to build the LangSmith dataset (seen split). Line tolerance is plus or minus 1. The test file is neutral because weak test comments are not counted either way.
+
+```json
+{
+  "pr": 5,
+  "split": "seen",
+  "language": "Python",
+  "expected_route": [
+    "correctness",
+    "security",
+    "quality"
+  ],
+  "clean_files": [],
+  "neutral_files": [
+    "tests/test_shipping.py"
+  ],
+  "bugs": [
+    {"file": "shipping.py", "line": 13, "alt_line": 14, "kind": "off_by_one", "expected_agent": "correctness", "function": null},
+    {"file": "shipping.py", "line": 20, "alt_line": 19, "kind": "range_check", "expected_agent": "correctness", "function": null},
+    {"file": "shipping.py", "line": 27, "alt_line": 25, "kind": "injection", "expected_agent": "security", "function": null}
+  ]
+}
+```
