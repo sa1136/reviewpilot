@@ -3,14 +3,10 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
-import { api, type Health } from "@/lib/api";
+import { useHealth } from "@/lib/use-health";
 
 export function SiteHeader() {
-  const [health, setHealth] = useState<Health | null>(null);
-
-  useEffect(() => {
-    api.health().then(setHealth, () => setHealth(null));
-  }, []);
+  const { health } = useHealth();
 
   return (
     <header className="sticky top-0 z-20 border-b border-line bg-canvas/85 backdrop-blur">

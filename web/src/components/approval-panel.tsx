@@ -1,8 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, friendlyError, type PendingItem } from "@/lib/api";
+import Link from "next/link";
+import { api, ApiError, friendlyError, type PendingItem } from "@/lib/api";
 import { approveAll, choose, initialChoices, outcome, tally, toDecisions, type Choices } from "@/lib/decisions";
+import { DEMO_UNAVAILABLE } from "@/lib/demo";
 import { Button, ErrorBox, SeverityBadge, Spinner } from "./ui";
 
 type Section = { key: string; title: string; note?: string; items: PendingItem[] };
@@ -26,7 +28,7 @@ export function ApprovalPanel({
   const [editing, setEditing] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [posting, setPosting] = useState(false);
-  const [error, setError] = useState<{ title: string; detail: string } | null>(null);
+  const [error, setError] = useState<{ title: string; detail: string; gone?: boolean } | null>(null);
   const [focus, setFocus] = useState(0);
   const refs = useRef<Record<string, HTMLDivElement | null>>({});
 
@@ -86,7 +88,12 @@ export function ApprovalPanel({
       await api.decide(reviewId, toDecisions(items, choices), true);
       onPosted();
     } catch (e) {
-      setError(friendlyError(e));
+      const gone = e instanceof ApiError && e.status === 404;
+      setError(
+        gone
+          ? { title: "This review is no longer available", detail: demo ? DEMO_UNAVAILABLE : "The server no longer has it.", gone }
+          : friendlyError(e),
+      );
       setPosting(false);
       setConfirming(false);
     }
@@ -148,7 +155,17 @@ export function ApprovalPanel({
       <div className="sticky bottom-3 z-10 rounded-xl border border-line-strong bg-surface/95 p-3 shadow-lg shadow-black/5 backdrop-blur">
         {error && (
           <div className="mb-3">
-            <ErrorBox title={error.title} detail={error.detail} />
+            <ErrorBox
+              title={error.title}
+              detail={error.detail}
+              action={
+                error.gone && (
+                  <Link href="/" className="text-sm font-medium text-accent-text hover:underline">
+                    Start a new review
+                  </Link>
+                )
+              }
+            />
           </div>
         )}
         <div className="flex flex-wrap items-center gap-3">
@@ -159,7 +176,7 @@ export function ApprovalPanel({
           </p>
           {!confirming ? (
             <Button variant="primary" onClick={() => setConfirming(true)} disabled={posting} data-testid="post-button">
-              Post {counts.inline} to GitHub
+              {demo ? `Post ${counts.inline} (demo)` : `Post ${counts.inline} to GitHub`}
             </Button>
           ) : (
             <div className="flex flex-wrap items-center gap-2" data-testid="confirm-post">
@@ -168,7 +185,7 @@ export function ApprovalPanel({
                 <span className="font-mono">
                   {repo}#{pr}
                 </span>
-                {demo && <span className="text-faint"> (demo: nothing leaves this machine)</span>}?
+                {demo && <span className="text-faint"> (demo: nothing is sent to GitHub)</span>}?
               </span>
               <Button variant="ghost" onClick={() => setConfirming(false)} disabled={posting}>
                 Cancel

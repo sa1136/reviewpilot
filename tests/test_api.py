@@ -294,7 +294,7 @@ async def test_auth_token_required_except_health(tmp_path):
         assert health.status_code == 200
         assert health.json() == {"ok": True, "anthropic_configured": True,
                                  "github_configured": True, "checkpointer": "sqlite",
-                                 "auth_required": True, "demo": False}  # fmt: skip
+                                 "auth_required": True, "demo": False, "public": False}  # fmt: skip
         assert SECRET not in health.text
         assert (await client.get("/reviews")).status_code == 401
         wrong = await client.get("/reviews", headers={"Authorization": "Bearer nope"})

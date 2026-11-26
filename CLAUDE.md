@@ -216,6 +216,23 @@ The checkpointer is what lets the graph stop at approval and pick up later, even
   (0.3; tests use 0). Costs are priced with the fixture's model (Haiku). Demo uses its own
   databases (`.reviewpilot/demo-*.db`), needs no keys, can "post" without `GITHUB_TOKEN`, and
   `/health` reports `demo: true` (the UI shows a badge).
+- **Public demo** (Stage 10, first step; `docs/DEPLOY.md`): API on Render free running
+  `api.public:app`, web on Vercel Hobby. `api.public` refuses to start unless `REVIEWPILOT_DEMO=1`
+  (exactly), `REVIEWPILOT_API_TOKEN` is 32+ characters and no real credential is set (names listed
+  in `api.public.FORBIDDEN`); it never reads `.env` and passes the demo GitHub and models in.
+  `api.main` (local) refuses to start when `RENDER` is set. `create_app` lives in `api/app.py`
+  (import has no side effects). With `limits=PublicLimits()` reviews are private: proxy.ts sets an
+  `HttpOnly` `rp_visitor` cookie on page loads, the `/api` proxy forwards it as
+  `x-reviewpilot-visitor` plus the client IP as `x-reviewpilot-client` (headers from the browser
+  are never forwarded), and the API stores a sha256 prefix as `reviews.owner`. Thread id gets
+  `~v-<owner hash>` after `repo#pr@sha`, so the same link is a fresh run per visitor; existing
+  threads are found in the store, not by scanning checkpoints. Another visitor's review is a 404.
+  Limits in `api/limits.py` (running per visitor / IP / total, new per IP per hour, stored per
+  visitor / total, 24 h expiry, decision calls, open streams, 64 KB bodies, docs off); counters are
+  in memory, so one worker. Deleting a review deletes its events and checkpoints. Streams close
+  after 290 s (Vercel's limit is 300 s) and the browser reconnects with Last-Event-ID. The browser
+  stops streaming while a review awaits approval and resumes after posting or on tab focus. Demo
+  screens never link the fake `#demo-` post URLs. Playwright runs against `api.public`.
 - **Repo location:** `~/code/reviewpilot` (outside iCloud). The sandbox clone is at
   `~/code/reviewpilot-sandbox`.
 - **Holdout discipline:** PRs #6 to #15 (Stage 9 holdout split) are never used for tuning. #1 and
@@ -297,7 +314,8 @@ reviewpilot/                # the engine (Python)
   graph.py    StateGraph wiring, fetch_pr, router node, post_review
   cli.py      python -m reviewpilot --repo o/r --pr 12 --dry-run
   prompts/    correctness.md security.md quality.md judge.md agent_rules.md
-api/          FastAPI: main.py (endpoints), runner.py (runs, events, snapshots), store.py
+api/          FastAPI: app.py (create_app, endpoints), main.py (local entry), public.py (public demo
+              entry), limits.py, visitors.py, runner.py (runs, events, snapshots), store.py
               (history + event log), schemas.py (request and response models)
 scripts/      demo_api.sh: curl walkthrough of the API
 reviewpilot/demo.py  demo mode: fixture PR, replayed model answers, fake poster
@@ -349,7 +367,8 @@ docs/         action plans
   Python), experiments A to D x 3 reps in LangSmith, results in `evals/RESULTS.md` and the README;
   default set to Haiku everywhere. Holdout A: 84 of 84 bugs over 3 runs, $0.0024 per review.
 - [ ] **Stage 10. Bonus** — GitHub Action auto mode, deploy (Vercel plus a hosted API and
-  Postgres), GitHub App for a bot identity.
+  Postgres), GitHub App for a bot identity. First step in progress: public demo only (code and
+  config done; not deployed yet).
 
 ## API reference (for Stage 8)
 
@@ -414,6 +433,7 @@ uv run python -m reviewpilot review --repo owner/name --pr 12 --diff-only     # 
 uv run uvicorn api.main:app --reload                # API on :8000, docs at /docs
 scripts/demo_api.sh https://github.com/owner/repo/pull/12   # curl walkthrough of the API
 REVIEWPILOT_DEMO=1 uv run uvicorn api.main:app      # API in demo mode: no keys, no cost
+REVIEWPILOT_DEMO=1 REVIEWPILOT_API_TOKEN=... uv run uvicorn api.public:app --workers 1  # public demo
 cd web && npm install && npm run dev               # web on :3000 (web/.env.local, see .env.example)
 cd web && npm run lint && npm run typecheck && npm test   # web checks
 cd web && npm run test:e2e                         # Playwright; starts a demo API on :8001 itself

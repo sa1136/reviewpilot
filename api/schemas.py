@@ -16,10 +16,13 @@ class Health(BaseModel):
     checkpointer: str
     auth_required: bool
     demo: bool = False
+    public: bool = False  # the public demo: reviews are private to each visitor
 
 
 class StartReview(BaseModel):
-    pr_url: str = Field(examples=["https://github.com/sa1136/reviewpilot-sandbox/pull/4"])
+    pr_url: str = Field(
+        max_length=300, examples=["https://github.com/sa1136/reviewpilot-sandbox/pull/4"]
+    )
     fresh: bool = False
 
 
@@ -136,13 +139,13 @@ class ReviewSnapshot(BaseModel):
 
 
 class Decision(BaseModel):
-    id: str
+    id: str = Field(max_length=16)
     action: Literal["approve", "reject", "edit", "promote"]
-    body: str | None = None
+    body: str | None = Field(default=None, max_length=4000)
 
 
 class Decisions(BaseModel):
-    decisions: list[Decision] = []
+    decisions: list[Decision] = Field(default=[], max_length=100)
     post: bool = False
 
 

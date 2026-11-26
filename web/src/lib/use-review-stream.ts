@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { api, ApiError } from "./api";
-import { initialView, isTerminal, reviewReducer, type ReviewEvent } from "./review-reducer";
+import { initialView, isTerminal, reviewReducer, waitsForPerson, type ReviewEvent } from "./review-reducer";
 import { readSse } from "./sse";
 
 export type Connection = "connecting" | "live" | "reconnecting" | "closed";
@@ -13,12 +13,18 @@ const REFRESH_ON = new Set(["awaiting_approval", "posted", "error"]);
 /**
  * Live review state: load the snapshot, then follow the SSE stream from its last_event_id.
  * Reconnects with backoff and resumes with Last-Event-ID; stops once posted or failed.
+ *
+ * It also stops while the review waits for approval: only this person's decisions move it on, and
+ * an idle tab would otherwise reconnect for as long as it stayed open. Call resume() after
+ * sending decisions. Coming back to the tab checks whether another tab moved the review on.
  */
 export function useReviewStream(reviewId: string) {
   const [view, dispatch] = useReducer(reviewReducer, reviewId, initialView);
   const [connection, setConnection] = useState<Connection>("connecting");
   const [loadError, setLoadError] = useState<ApiError | null>(null);
   const lastId = useRef(0);
+  const [run, setRun] = useState(0);
+  const resume = useCallback(() => setRun((n) => n + 1), []);
 
   useEffect(() => {
     lastId.current = view.lastEventId;
@@ -36,7 +42,7 @@ export function useReviewStream(reviewId: string) {
     const abort = new AbortController();
     let attempt = 0;
 
-    async function run() {
+    async function follow() {
       setConnection("connecting");
       let snapshot;
       try {
@@ -51,7 +57,7 @@ export function useReviewStream(reviewId: string) {
       setLoadError(null);
       dispatch({ type: "snapshot", snapshot });
       lastId.current = Math.max(lastId.current, snapshot.last_event_id);
-      if (isTerminal(snapshot.status)) {
+      if (isTerminal(snapshot.status) || waitsForPerson(snapshot.status)) {
         setConnection("closed");
         return;
       }
@@ -78,17 +84,31 @@ export function useReviewStream(reviewId: string) {
             dispatch({ type: "event", event });
             lastId.current = Math.max(lastId.current, event.id);
             if (REFRESH_ON.has(event.type)) void refresh();
-            if (event.type === "posted" || event.type === "error") finished = true;
+            if (event.type === "posted" || event.type === "error" || event.type === "awaiting_approval") {
+              finished = true;
+              break;
+            }
           }
-          // The server closes the stream only when the review is posted or failed.
-          if (finished) break;
-          const latest = await api.getReview(reviewId).catch(() => null);
-          if (latest && isTerminal(latest.status)) {
+          if (finished) {
+            void response.body.cancel().catch(() => undefined); // close the connection
+            break;
+          }
+          // The stream ended early: a time limit, a restart or a dropped connection.
+          const latest = await api.getReview(reviewId).catch((error) => {
+            if (error instanceof ApiError && error.status === 404) throw error;
+            return null;
+          });
+          if (latest && (isTerminal(latest.status) || waitsForPerson(latest.status))) {
             dispatch({ type: "snapshot", snapshot: latest });
             break;
           }
-        } catch {
+        } catch (error) {
           if (abort.signal.aborted) return;
+          if (error instanceof ApiError && error.status === 404) {
+            setLoadError(error);
+            setConnection("closed");
+            return;
+          }
         }
         setConnection("reconnecting");
         const wait = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)];
@@ -98,9 +118,29 @@ export function useReviewStream(reviewId: string) {
       if (!abort.signal.aborted) setConnection("closed");
     }
 
-    void run();
+    void follow();
     return () => abort.abort();
-  }, [reviewId, refresh]);
+  }, [reviewId, refresh, run]);
 
-  return { view, connection, loadError, refresh };
+  const waiting = view.loaded && waitsForPerson(view.status);
+  useEffect(() => {
+    if (!waiting) return;
+    async function check() {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const latest = await api.getReview(reviewId);
+        if (!waitsForPerson(latest.status)) resume();
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) setLoadError(error);
+      }
+    }
+    window.addEventListener("focus", check);
+    document.addEventListener("visibilitychange", check);
+    return () => {
+      window.removeEventListener("focus", check);
+      document.removeEventListener("visibilitychange", check);
+    };
+  }, [waiting, reviewId, resume]);
+
+  return { view, connection, loadError, refresh, resume };
 }

@@ -1,6 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const API = "http://localhost:8001";
 // The demo API serves the fixture PR for any number, so each test uses its own PR (and review).
 const prLink = (n: number) => `https://github.com/sa1136/reviewpilot-sandbox/pull/${n}`;
 const agents = ["correctness", "security", "quality"];
@@ -14,7 +13,7 @@ async function startFromHome(page: Page, pr: number) {
   return page.url().split("/reviews/")[1];
 }
 
-test("paste a link, watch the agents, reject one, edit one, post", async ({ page, request }) => {
+test("paste a link, watch the agents, reject one, edit one, post", async ({ page }) => {
   const id = await startFromHome(page, 101);
   await expect(page.getByTestId("pr-title")).toHaveText("Add coupon helpers for the checkout page");
 
@@ -46,10 +45,12 @@ test("paste a link, watch the agents, reject one, edit one, post", async ({ page
   await page.getByTestId("confirm-post-button").click();
 
   await expect(page.getByTestId("posted-title")).toContainText("Posted 3 inline comments");
-  await expect(page.getByTestId("review-link")).toHaveAttribute("href", /pull\/101#demo-review/);
+  // The demo says nothing was sent, and never links to a made up GitHub result.
+  await expect(page.getByTestId("demo-posted-note")).toContainText("nothing was sent to GitHub");
+  await expect(page.getByTestId("review-link")).toHaveCount(0);
   await expect(page.locator('[data-step="Posted"]')).toHaveAttribute("data-state", "done");
 
-  const snapshot = await (await request.get(`${API}/reviews/${id}`)).json();
+  const snapshot = await (await page.request.get(`/api/reviews/${id}`)).json();
   expect(snapshot.status).toBe("posted");
   expect(snapshot.review_stats).toMatchObject({ reject: 1, edit: 1 });
 

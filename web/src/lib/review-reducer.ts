@@ -320,3 +320,7 @@ export function reviewSeconds(v: ReviewView): number | null {
 export function isTerminal(status: ReviewStatus): boolean {
   return status === "posted" || status === "failed";
 }
+
+export function waitsForPerson(status: ReviewStatus): boolean {
+  return status === "awaiting_approval";
+}

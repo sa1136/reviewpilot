@@ -182,6 +182,11 @@ export interface components {
              * @default false
              */
             demo: boolean;
+            /**
+             * Public
+             * @default false
+             */
+            public: boolean;
         };
         /** PendingItem */
         PendingItem: {

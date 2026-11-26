@@ -132,7 +132,7 @@ def start_review(
         else:
             print(f"Review already done for {head_sha[:7]}; it is waiting for approval.")
     else:
-        tid = fresh_thread_id(repo, pr, head_sha) if fresh else base
+        tid = fresh_thread_id(base) if fresh else base
         state = initial_state(repo, pr, tid, fresh=fresh) | {"fake": fake}
         graph.invoke(state, config_for(tid))
 

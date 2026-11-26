@@ -25,10 +25,10 @@ def thread_id(repo: str, pr: int, head_sha: str) -> str:
     return f"{repo}#{pr}@{head_sha}"
 
 
-def fresh_thread_id(repo: str, pr: int, head_sha: str) -> str:
-    """A new thread for the same commit (--fresh)."""
+def fresh_thread_id(base: str) -> str:
+    """A new thread for the same commit (--fresh). `base` comes from thread_id()."""
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
-    return f"{thread_id(repo, pr, head_sha)}~fresh-{stamp}"
+    return f"{base}~fresh-{stamp}"
 
 
 @contextmanager

@@ -9,7 +9,7 @@ import asyncio
 import base64
 import json
 from collections import Counter
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from langgraph.types import Command
@@ -21,6 +21,7 @@ from reviewpilot.graph import build_graph, config_for
 from reviewpilot.llm import run_totals
 from reviewpilot.state import initial_state
 
+from .limits import HourlyRate, PublicLimits
 from .store import Store
 
 TERMINAL = ("posted", "failed")
@@ -49,8 +50,20 @@ def severity_counts(findings) -> dict[str, int]:
 
 
 class ReviewManager:
-    def __init__(self, settings: Settings, store: Store, saver, github, model_factory):
+    def __init__(
+        self,
+        settings: Settings,
+        store: Store,
+        saver,
+        github,
+        model_factory,
+        limits: PublicLimits | None = None,
+    ):
         self.settings, self.store, self.github = settings, store, github
+        self.limits = limits
+        self.new_reviews = HourlyRate(limits.new_per_client_per_hour) if limits else None
+        self.callers: dict[str, object] = {}  # thread id -> Caller of the running task
+        self.decision_calls: Counter[str] = Counter()  # review id -> accepted decision calls
         self.graph = build_graph(
             settings, model_factory, github=github, dry_run=False, checkpointer=saver
         )
@@ -71,10 +84,75 @@ class ReviewManager:
     def _state(self, tid: str):
         return self.graph.get_state(config_for(tid))
 
-    def _ensure_row(self, rid: str, tid: str, repo: str, pr: int, sha: str, status: str) -> None:
+    def _ensure_row(
+        self, rid: str, tid: str, repo: str, pr: int, sha: str, status: str, owner: str = ""
+    ) -> None:
         if self.store.get_review(rid) is None:
             title = (self._state(tid).values or {}).get("pr_title", "")
-            self.store.create_review(rid, tid, repo, pr, sha, status, title)
+            self.store.create_review(rid, tid, repo, pr, sha, status, title, owner)
+
+    # --- visitors and limits (public demo only) -------------------------------------------------
+
+    def require(self, rid: str, who) -> dict:
+        """The review row, if this caller may see it. Someone else's review looks exactly like
+        one that does not exist."""
+        row = self.store.get_review(rid)
+        if row is None or (self.limits and row["owner"] != who.owner):
+            raise ApiError(404, "unknown review")
+        return row
+
+    def _delete(self, row: dict) -> None:
+        self.saver.delete_thread(row["thread_id"])
+        self.store.delete_review(row["review_id"])
+        self.decision_calls.pop(row["review_id"], None)
+
+    def _expire(self) -> None:
+        cutoff = datetime.now(UTC) - timedelta(hours=self.limits.ttl_hours)
+        for row in self.store.list_reviews():
+            if row["thread_id"] not in self.active and (
+                datetime.fromisoformat(row["created_at"]) < cutoff
+            ):
+                self._delete(row)
+
+    async def expire(self) -> None:
+        if self.limits:
+            async with self._lock:
+                self._expire()
+
+    def _make_room(self, owner: str) -> None:
+        """Delete the oldest idle reviews so one more fits under both storage caps."""
+        for scope, cap in ((owner, self.limits.stored_per_visitor),
+                           (None, self.limits.stored_total)):  # fmt: skip
+            rows = self.store.list_reviews(scope)
+            idle = sorted(
+                (r for r in rows if r["thread_id"] not in self.active),
+                key=lambda r: r["updated_at"],
+            )
+            for row in idle[: max(len(rows) - cap + 1, 0)]:
+                self._delete(row)
+
+    def _check_running(self, who) -> None:
+        if not self.limits:
+            if len(self.active) >= self.settings.max_concurrent_reviews:
+                raise ApiError(
+                    429,
+                    f"{len(self.active)} reviews are already running (limit "
+                    f"{self.settings.max_concurrent_reviews}); try again when one finishes",
+                )
+            return
+        # A task whose review already reached approval is only finishing up: not "running".
+        running = [
+            c for tid, c in self.callers.items()
+            if tid in self.active
+            and (self.store.get_review(encode_id(tid)) or {}).get("status")
+            in ("running", "posting")
+        ]  # fmt: skip
+        if sum(c.owner == who.owner for c in running) >= self.limits.running_per_visitor:
+            raise ApiError(429, "your demo review is still running; wait for it to finish")
+        if sum(c.client == who.client for c in running) >= self.limits.running_per_client:
+            raise ApiError(429, "too many reviews are running from your network; try again soon")
+        if len(running) >= self.limits.running_total:
+            raise ApiError(429, "the demo is busy; try again in a few seconds")
 
     def scrub_all(self, data):
         """scrub() applied to every string in a JSON compatible value."""
@@ -90,7 +168,7 @@ class ReviewManager:
 
     # --- starting and resuming ------------------------------------------------------------------
 
-    async def start(self, repo: str, pr: int, fresh: bool) -> tuple[int, dict]:
+    async def start(self, repo: str, pr: int, fresh: bool, who) -> tuple[int, dict]:
         try:
             head = await asyncio.to_thread(self.github.get_pull_request, repo, pr)
         except httpx.HTTPStatusError as exc:
@@ -99,10 +177,16 @@ class ReviewManager:
             raise ApiError(502, f"GitHub error {exc.response.status_code}") from exc
 
         base = thread_id(repo, pr, head.head_sha)
+        if self.limits:
+            base = f"{base}~v-{who.owner}"  # one saved review per visitor and commit
         async with self._lock:
-            existing = [] if fresh else list_threads(self.saver, base)
-            tid = existing[0] if existing else (fresh_thread_id(repo, pr, head.head_sha)
-                                                if fresh else base)  # fmt: skip
+            if self.limits:
+                self._expire()
+                # Only this visitor's reviews, from the store (not by scanning checkpoints).
+                existing = [] if fresh else self.store.thread_ids(who.owner, base)
+            else:
+                existing = [] if fresh else list_threads(self.saver, base)
+            tid = existing[0] if existing else (fresh_thread_id(base) if fresh else base)
             rid = encode_id(tid)
             ref = {"review_id": rid, "thread_id": tid, "repo": repo, "pr": pr,
                    "sha": head.head_sha}  # fmt: skip
@@ -111,27 +195,29 @@ class ReviewManager:
                 return 200, {**ref, "status": self.store.get_review(rid)["status"]}
 
             graph_input = initial_state(repo, pr, tid, fresh=fresh)
-            if existing:
+            # A run that died before its first checkpoint has nothing saved: start it again.
+            if existing and self._state(tid).values:
                 snapshot = self._state(tid)
                 if not snapshot.next:
-                    self._ensure_row(rid, tid, repo, pr, head.head_sha, "posted")
+                    self._ensure_row(rid, tid, repo, pr, head.head_sha, "posted", who.owner)
                     self.store.update_review(rid, status="posted")
                     return 200, {**ref, "status": "posted"}
                 if snapshot.next == ("approval",):
                     status = "failed" if snapshot.interrupts[0].value["status"] == "failed" \
                         else "awaiting_approval"  # fmt: skip
-                    self._ensure_row(rid, tid, repo, pr, head.head_sha, status)
+                    self._ensure_row(rid, tid, repo, pr, head.head_sha, status, who.owner)
                     return 200, {**ref, "status": self.store.get_review(rid)["status"]}
                 graph_input = None  # interrupted mid run: resume from the last checkpoint
 
-            if len(self.active) >= self.settings.max_concurrent_reviews:
-                raise ApiError(
-                    429,
-                    f"{len(self.active)} reviews are already running (limit "
-                    f"{self.settings.max_concurrent_reviews}); try again when one finishes",
-                )
-            self._ensure_row(rid, tid, repo, pr, head.head_sha, "running")
+            self._check_running(who)
+            if self.limits and self.store.get_review(rid) is None:
+                if self.new_reviews.full(who.client):
+                    raise ApiError(429, "hourly demo limit reached for your network; try later")
+                self.new_reviews.hit(who.client)
+                self._make_room(who.owner)
+            self._ensure_row(rid, tid, repo, pr, head.head_sha, "running", who.owner)
             self.store.update_review(rid, status="running", error=None)
+            self.callers[tid] = who
             self._launch(rid, tid, graph_input, resuming=False)
             return 202, {**ref, "status": "running"}
 
@@ -155,6 +241,10 @@ class ReviewManager:
                 raise ApiError(400, "posting needs GITHUB_TOKEN on the server")
             if post and snapshot.values.get("fake"):
                 raise ApiError(400, "this review used a fake model and cannot be posted")
+            if self.limits:
+                if self.decision_calls[rid] >= self.limits.decision_calls_per_review:
+                    raise ApiError(429, "too many decision requests for this demo review")
+                self.decision_calls[rid] += 1
             status = "posting" if post else "running"
             self.store.update_review(rid, status=status)
             command = Command(resume={"decisions": decisions, "post": post})
@@ -172,6 +262,7 @@ class ReviewManager:
         finally:
             if self.active.get(tid) is asyncio.current_task():
                 del self.active[tid]
+                self.callers.pop(tid, None)
 
     def _run_sync(self, rid: str, tid: str, graph_input, resuming: bool) -> None:
         # On resume the approval node runs again and repeats its awaiting_approval event before

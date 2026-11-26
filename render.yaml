@@ -1,0 +1,19 @@
+# The public demo API on Render's free plan. See docs/DEPLOY.md.
+# It runs api.public:app, which only ever runs the demo: it refuses to start if REVIEWPILOT_DEMO
+# is not 1 or if any real credential is set. Never add one here or in the dashboard.
+services:
+  - type: web
+    name: reviewpilot-demo-api
+    runtime: python
+    plan: free
+    buildCommand: uv sync --frozen --no-dev
+    startCommand: uv run --no-sync uvicorn api.public:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health
+    autoDeployTrigger: "off" # deploys are started by hand
+    envVars:
+      - key: REVIEWPILOT_DEMO
+        value: "1"
+      - key: REVIEWPILOT_API_TOKEN
+        generateValue: true # copy it into the Vercel project; never commit it
+      - key: PYTHON_VERSION
+        value: "3.12.7"

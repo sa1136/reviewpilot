@@ -4,10 +4,10 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { api, friendlyError, type ReviewListItem } from "@/lib/api";
+import { DEMO_PR_URL } from "@/lib/demo";
 import { prUrlProblem } from "@/lib/pr-url";
+import { useHealth } from "@/lib/use-health";
 import { Button, Card, ErrorBox, formatCost, formatDate, Skeleton, Spinner, StatusPill } from "./ui";
-
-const EXAMPLE = "https://github.com/sa1136/reviewpilot-sandbox/pull/4";
 
 export function HomeView() {
   const router = useRouter();
@@ -17,13 +17,16 @@ export function HomeView() {
   const [error, setError] = useState<{ title: string; detail: string } | null>(null);
   const [recent, setRecent] = useState<ReviewListItem[] | null>(null);
   const [recentError, setRecentError] = useState<string | null>(null);
+  const { health, waking, unreachable } = useHealth();
 
+  const ready = health !== null || unreachable;
   useEffect(() => {
+    if (!ready) return; // wait for a sleeping server to wake
     api.listReviews().then(
       (rows) => setRecent(rows.slice(0, 5)),
       (e) => setRecentError(friendlyError(e).detail),
     );
-  }, []);
+  }, [ready]);
 
   const problem = prUrlProblem(url);
   const showProblem = touched && problem;
@@ -32,10 +35,14 @@ export function HomeView() {
     event.preventDefault();
     setTouched(true);
     if (!url.trim() || problem) return;
+    await start(url.trim(), false);
+  }
+
+  async function start(prUrl: string, fresh: boolean) {
     setSubmitting(true);
     setError(null);
     try {
-      const ref = await api.startReview(url.trim());
+      const ref = await api.startReview(prUrl, fresh);
       router.push(`/reviews/${ref.review_id}`);
     } catch (e) {
       setError(friendlyError(e));
@@ -53,6 +60,27 @@ export function HomeView() {
           Paste a GitHub pull request. Specialist reviewers check correctness, security and quality in parallel, every
           finding is checked against the real diff and a judge, and nothing reaches GitHub until you approve it.
         </p>
+
+        {waking && (
+          <p role="status" data-testid="waking" className="mt-5 flex items-center gap-2 text-sm text-muted">
+            <Spinner /> Waking up the server. The free demo sleeps when idle, so this can take about a minute.
+          </p>
+        )}
+
+        {health?.demo && (
+          <Card className="mt-6 max-w-2xl border-accent/30 p-4" data-testid="demo-notice">
+            <p className="font-semibold">This is a demo</p>
+            <p className="mt-1 text-sm text-muted">
+              It replays a recorded ReviewPilot review of one sandbox pull request, so you&apos;ll see the same findings
+              whatever link you paste. No model is called, nothing is sent to GitHub, and the cost shown is from the
+              recorded run.
+            </p>
+            <Button variant="primary" className="mt-3" disabled={submitting} onClick={() => void start(DEMO_PR_URL, true)}>
+              {submitting ? <Spinner /> : null} Try the demo
+            </Button>
+            <p className="mt-2 text-xs text-faint">No link or sign up needed. Approve, edit or reject the comments yourself.</p>
+          </Card>
+        )}
 
         <form onSubmit={submit} noValidate className="mt-7 max-w-2xl">
           <label htmlFor="pr-url" className="mb-1.5 block text-sm font-medium">
@@ -95,8 +123,8 @@ export function HomeView() {
             ) : (
               <>
                 For example{" "}
-                <button type="button" className="font-mono underline decoration-dotted underline-offset-2 hover:text-fg" onClick={() => setUrl(EXAMPLE)}>
-                  {EXAMPLE.replace("https://", "")}
+                <button type="button" className="font-mono underline decoration-dotted underline-offset-2 hover:text-fg" onClick={() => setUrl(DEMO_PR_URL)}>
+                  {DEMO_PR_URL.replace("https://", "")}
                 </button>
               </>
             )}

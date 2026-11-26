@@ -4,12 +4,14 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { api, friendlyError, type ReviewListItem } from "@/lib/api";
+import { useHealth } from "@/lib/use-health";
 import { Card, ErrorBox, formatCost, formatDate, SeverityCountsRow, Skeleton, StatusPill } from "./ui";
 
 export function HistoryView() {
   const [rows, setRows] = useState<ReviewListItem[] | null>(null);
   const [error, setError] = useState<{ title: string; detail: string } | null>(null);
   const router = useRouter();
+  const isPublic = useHealth().health?.public ?? false;
 
   useEffect(() => {
     api.listReviews().then(setRows, (e) => setError(friendlyError(e)));
@@ -22,7 +24,11 @@ export function HistoryView() {
       <div className="flex flex-wrap items-end justify-between gap-2">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">History</h1>
-          <p className="text-sm text-muted">Every review this server has run, newest first.</p>
+          <p className="text-sm text-muted">
+            {isPublic
+              ? "Your demo reviews, newest first. Only this browser can see them, and they don't last: a day at most."
+              : "Every review this server has run, newest first."}
+          </p>
         </div>
         {rows && rows.length > 0 && (
           <p className="text-sm text-muted">

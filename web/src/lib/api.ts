@@ -98,7 +98,7 @@ export function friendlyError(error: unknown): { title: string; detail: string }
     case 422:
       return { title: "Invalid request", detail: error.detail };
     case 429:
-      return { title: "Too many reviews running", detail: error.detail };
+      return { title: "Please wait a moment", detail: error.detail };
     case 502:
     case 503:
       return { title: "The review API is unavailable", detail: error.detail };

@@ -2,9 +2,11 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { use, useEffect, useState } from "react";
+import { use, useState } from "react";
 import { api, friendlyError } from "@/lib/api";
+import { DEMO_PR_URL, DEMO_UNAVAILABLE } from "@/lib/demo";
 import { AGENTS } from "@/lib/review-reducer";
+import { useHealth } from "@/lib/use-health";
 import { useReviewStream } from "@/lib/use-review-stream";
 import { ApprovalPanel } from "./approval-panel";
 import { AgentCard, ConnectionNote, RoundLines, RouterLine, StepBar, UsageFooter } from "./review-parts";
@@ -16,14 +18,11 @@ export function ReviewLoader({ params }: { params: Promise<{ id: string }> }) {
 }
 
 export function ReviewView({ reviewId }: { reviewId: string }) {
-  const { view, connection, loadError, refresh } = useReviewStream(reviewId);
-  const [demo, setDemo] = useState(false);
+  const { view, connection, loadError, resume } = useReviewStream(reviewId);
+  const { health } = useHealth();
+  const demo = health?.demo ?? false;
   const router = useRouter();
   const [rerun, setRerun] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
-
-  useEffect(() => {
-    api.health().then((h) => setDemo(h.demo ?? false), () => undefined);
-  }, []);
 
   if (loadError) {
     const { title, detail } = friendlyError(loadError);
@@ -31,7 +30,13 @@ export function ReviewView({ reviewId }: { reviewId: string }) {
       <div className="mx-auto max-w-xl pt-10">
         <ErrorBox
           title={loadError.status === 404 ? "Review not found" : title}
-          detail={loadError.status === 404 ? "There's no review with this id. It may have been started on another server." : detail}
+          detail={
+            loadError.status === 404
+              ? demo
+                ? DEMO_UNAVAILABLE
+                : "There's no review with this id. It may have been started on another server."
+              : detail
+          }
           action={
             <Link href="/" className="text-sm font-medium text-accent-text hover:underline">
               Start a new review
@@ -74,8 +79,8 @@ export function ReviewView({ reviewId }: { reviewId: string }) {
           </span>
           {view.sha && <span className="font-mono text-faint">@ {shortSha(view.sha)}</span>}
           {prUrl && (
-            <a href={prUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-accent-text hover:underline">
-              Open on GitHub
+            <a href={demo ? DEMO_PR_URL : prUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-accent-text hover:underline">
+              {demo ? "See the recorded PR on GitHub" : "Open on GitHub"}
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                 <path d="M7 17L17 7M9 7h8v8" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
@@ -116,13 +121,13 @@ export function ReviewView({ reviewId }: { reviewId: string }) {
           pr={view.pr}
           items={view.pending}
           demo={demo}
-          onPosted={() => void refresh()}
+          onPosted={resume}
         />
       )}
 
       {view.status === "posting" && (
         <Card className="flex items-center gap-3 p-5 text-sm">
-          <Spinner className="h-4 w-4 text-accent" /> Posting the review to GitHub…
+          <Spinner className="h-4 w-4 text-accent" /> {demo ? "Recording the demo post…" : "Posting the review to GitHub…"}
         </Card>
       )}
 
@@ -147,6 +152,10 @@ function PostedPanel({
 }) {
   const posted = view.posted;
   const already = posted?.skipped;
+  // The demo's poster returns made up links; never offer them.
+  const real = (url: string | null | undefined) => (url && !url.includes("#demo-") ? url : null);
+  const reviewUrl = real(posted?.review_url);
+  const summaryUrl = real(posted?.summary_url);
   return (
     <Card className="p-5" data-testid="posted-panel">
       <div className="flex flex-wrap items-start gap-4">
@@ -174,16 +183,21 @@ function PostedPanel({
               )}
             </>
           )}
+          {demo && (
+            <p className="mt-1 text-sm text-muted" data-testid="demo-posted-note">
+              This is a demo: your decisions were recorded, and nothing was sent to GitHub.
+            </p>
+          )}
           <div className="mt-3 flex flex-wrap gap-2">
-            {posted?.review_url && (
-              <a href={posted.review_url} target="_blank" rel="noreferrer" data-testid="review-link">
+            {reviewUrl && (
+              <a href={reviewUrl} target="_blank" rel="noreferrer" data-testid="review-link">
                 <Button variant="primary" size="sm" tabIndex={-1}>
                   View review on GitHub
                 </Button>
               </a>
             )}
-            {posted?.summary_url && (
-              <a href={posted.summary_url} target="_blank" rel="noreferrer">
+            {summaryUrl && (
+              <a href={summaryUrl} target="_blank" rel="noreferrer">
                 <Button size="sm" tabIndex={-1}>
                   Summary comment
                 </Button>

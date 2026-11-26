@@ -49,6 +49,7 @@ class DemoGitHub:
         self._wait(FETCH_SECONDS)
         post = {"repo": repo, "pr": number, "sha": head_sha, "inline": len(inline_findings)}
         self.posts.append(post | {"summary": summary_markdown})
+        del self.posts[:-20]  # a long running demo keeps only the latest
         base = f"https://github.com/{repo}/pull/{number}"
         return PostResult(
             skipped=False,
