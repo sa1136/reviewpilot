@@ -22,10 +22,18 @@ browser ── cookie rp_visitor ──> Vercel (Next.js, /api proxy) ── tok
   proxy passes it to the API (the browser cannot set that header), and the API keeps a hash of it as
   the review's owner. Someone else's review answers 404, exactly like one that does not exist. The
   same PR link gives each visitor their own run; a refresh gets your own review back.
-* **Limits** (`api/limits.py`): 1 running review per visitor, 2 per IP address, 8 in total; 20 new
-  reviews per IP per hour; 10 stored reviews per visitor and 200 in total (oldest idle deleted
-  first); reviews expire after 24 hours; 20 decision calls per review; 4 open event streams per
-  visitor and 50 in total; request bodies over 64 KB refused; API docs off.
+* **Limits** (`api/limits.py`). "Network" means an IPv4 address or an IPv6 /64.
+  * Running: 1 review per visitor, 2 per network, 8 in total.
+  * New reviews: 20 per network per hour.
+  * Stored: 10 per visitor (their own oldest idle review goes, even if recent), 30 per network
+    (that network's oldest idle review goes first) and 200 in total. A review used in the last 30
+    minutes (opened, streamed, decided on) is never deleted for the network or total cap; if
+    nothing can go, a new demo gets "the demo is full right now". A refused start deletes nothing.
+  * Reviews expire after 24 hours; 20 decision calls per review; 4 open event streams per visitor
+    and 50 in total; request bodies over 64 KB refused; API docs off.
+* **Load** (2026-11-26, simulated 0.1 CPU by pausing the process 90 ms of every 100 ms): 8
+  concurrent reviews reached approval in 6.9 to 8.4 s (7 s alone) and posted, with 40 more event
+  streams held open; `/health` stayed under 1.6 s with no failures; memory peaked at 96 MB of 512.
 
 ## Plan limits (checked 2026-11-26)
 
@@ -45,9 +53,10 @@ change, if the sleep or the lost data ever matters, is Render's $7 a month insta
 GB disk.
 
 What that means for visitors: the first visit after a quiet spell waits about a minute (the home
-page says the server is waking up). A sleep or restart deletes every demo review, so an approval
-left open for more than 15 minutes may come back as "no longer available", with a link to start
-again.
+page says the server is waking up). A sleep or restart deletes every demo review. While the
+approval screen is showing in a visible tab, the browser pings `/health` every 5 minutes for up to
+30 minutes, so the server stays awake while someone is deciding. After that, or with the tab
+hidden, an approval may come back as "no longer available", with a link to start again.
 
 ## Streaming
 
@@ -56,7 +65,9 @@ each stream after 290 s and the browser reconnects with `Last-Event-ID`, so no e
 repeated. While a review waits for approval the browser closes the stream, since only that
 person's decisions can move it on, and opens it again after posting. A second tab catches up when
 you return to it. `web/vercel.json` turns on `supportsCancellation`, so closing a tab also closes
-the stream to the API.
+the stream to the API. Checked live on 2026-11-26: after 4 streams through Vercel were dropped by
+the client, a new one was held open (the per visitor cap of 4 had been freed); with 4 held, a fifth
+was refused in 0.2 s.
 
 ## Set it up
 
@@ -87,7 +98,8 @@ Render, which you then copy into Vercel.)
    detected).
 2. Environment variables (Production): `REVIEWPILOT_API_URL` = `https://<service>.onrender.com` (no
    trailing slash), `REVIEWPILOT_API_TOKEN` = the same token. Mark the token **Sensitive**.
-3. Deploy. Open the site: the header shows "Demo mode" and the home page "This is a demo".
+3. Deploy. Open the site: the header shows "Demo mode" and the home page "This is a demo" with a
+   Try the demo button. The public demo has no link input (local mode keeps it).
 
 **4. Check it.** Press Try the demo in two separate browser windows (one private), and confirm each
 sees only its own review in History and that one window's review link shows "Review not found" in

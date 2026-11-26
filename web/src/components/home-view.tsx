@@ -20,6 +20,10 @@ export function HomeView() {
   const { health, waking, unreachable } = useHealth();
 
   const ready = health !== null || unreachable;
+  // The public demo has no link input: it only ever replays the recorded review. Local mode
+  // (including local demo mode) keeps it. Hidden until we know, so it never flashes.
+  const isPublic = health?.public ?? false;
+  const showForm = health ? !isPublic : unreachable;
   useEffect(() => {
     if (!ready) return; // wait for a sleeping server to wake
     api.listReviews().then(
@@ -57,8 +61,9 @@ export function HomeView() {
           Agents do the first pass. <span className="text-muted">You do the last.</span>
         </h1>
         <p className="mt-3 max-w-2xl text-muted">
-          Paste a GitHub pull request. Specialist reviewers check correctness, security and quality in parallel, every
-          finding is checked against the real diff and a judge, and nothing reaches GitHub until you approve it.
+          {!isPublic && "Paste a GitHub pull request. "}Specialist reviewers check correctness, security and quality in
+          parallel, every finding is checked against the real diff and a judge, and nothing reaches GitHub until you
+          approve it.
         </p>
 
         {waking && (
@@ -71,17 +76,21 @@ export function HomeView() {
           <Card className="mt-6 max-w-2xl border-accent/30 p-4" data-testid="demo-notice">
             <p className="font-semibold">This is a demo</p>
             <p className="mt-1 text-sm text-muted">
-              It replays a recorded ReviewPilot review of one sandbox pull request, so you&apos;ll see the same findings
-              whatever link you paste. No model is called, nothing is sent to GitHub, and the cost shown is from the
-              recorded run.
+              {isPublic
+                ? "It replays a recorded ReviewPilot review of one sandbox pull request. "
+                : "It replays a recorded ReviewPilot review of one sandbox pull request, so you'll see the same findings whatever link you paste. "}
+              No model is called, nothing is sent to GitHub, and the cost shown is from the recorded run.
             </p>
             <Button variant="primary" className="mt-3" disabled={submitting} onClick={() => void start(DEMO_PR_URL, true)}>
               {submitting ? <Spinner /> : null} Try the demo
             </Button>
-            <p className="mt-2 text-xs text-faint">No link or sign up needed. Approve, edit or reject the comments yourself.</p>
+            <p className="mt-2 text-xs text-faint">
+              {isPublic ? "No sign up needed." : "No link or sign up needed."} Approve, edit or reject the comments yourself.
+            </p>
           </Card>
         )}
 
+        {showForm && (
         <form onSubmit={submit} noValidate className="mt-7 max-w-2xl">
           <label htmlFor="pr-url" className="mb-1.5 block text-sm font-medium">
             Pull request link
@@ -130,6 +139,7 @@ export function HomeView() {
             )}
           </p>
         </form>
+        )}
         {error && (
           <div className="mt-4 max-w-2xl">
             <ErrorBox title={error.title} detail={error.detail} />
@@ -157,7 +167,9 @@ export function HomeView() {
               ))}
             </ul>
           ) : recent.length === 0 ? (
-            <p className="p-6 text-center text-sm text-muted">No reviews yet. Paste a pull request link above.</p>
+            <p className="p-6 text-center text-sm text-muted">
+              {isPublic ? "No demo reviews yet. Press Try the demo above." : "No reviews yet. Paste a pull request link above."}
+            </p>
           ) : (
             <ul className="divide-y divide-line" data-testid="recent-reviews">
               {recent.map((r) => (

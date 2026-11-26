@@ -85,11 +85,12 @@ class ReviewManager:
         return self.graph.get_state(config_for(tid))
 
     def _ensure_row(
-        self, rid: str, tid: str, repo: str, pr: int, sha: str, status: str, owner: str = ""
+        self, rid: str, tid: str, repo: str, pr: int, sha: str, status: str, who=None
     ) -> None:
         if self.store.get_review(rid) is None:
             title = (self._state(tid).values or {}).get("pr_title", "")
-            self.store.create_review(rid, tid, repo, pr, sha, status, title, owner)
+            owner, client = (who.owner, who.client) if who else ("", "")
+            self.store.create_review(rid, tid, repo, pr, sha, status, title, owner, client)
 
     # --- visitors and limits (public demo only) -------------------------------------------------
 
@@ -99,6 +100,8 @@ class ReviewManager:
         row = self.store.get_review(rid)
         if row is None or (self.limits and row["owner"] != who.owner):
             raise ApiError(404, "unknown review")
+        if self.limits and _age_seconds(row["used_at"]) > 60:  # at most one write a minute
+            self.store.touch(rid)
         return row
 
     def _delete(self, row: dict) -> None:
@@ -119,17 +122,35 @@ class ReviewManager:
             async with self._lock:
                 self._expire()
 
-    def _make_room(self, owner: str) -> None:
-        """Delete the oldest idle reviews so one more fits under both storage caps."""
-        for scope, cap in ((owner, self.limits.stored_per_visitor),
-                           (None, self.limits.stored_total)):  # fmt: skip
-            rows = self.store.list_reviews(scope)
+    def _make_room(self, who) -> None:
+        """Delete the oldest idle reviews so one more fits under the visitor, client and total
+        caps. Under the client and total caps, a review used in the last keep_recent_minutes is
+        never deleted; if they cannot be met, nothing is deleted and the demo is full."""
+        keep = self.limits.keep_recent_minutes * 60
+        caps = (
+            (self.store.list_reviews(owner=who.owner), self.limits.stored_per_visitor, False),
+            (self.store.list_reviews(client=who.client), self.limits.stored_per_client, True),
+            (self.store.list_reviews(), self.limits.stored_total, True),
+        )
+        doomed: dict[str, dict] = {}
+        for rows, cap, protect_recent in caps:
+            left = [r for r in rows if r["review_id"] not in doomed]
+            need = len(left) - cap + 1
+            if need <= 0:
+                continue
             idle = sorted(
-                (r for r in rows if r["thread_id"] not in self.active),
-                key=lambda r: r["updated_at"],
-            )
-            for row in idle[: max(len(rows) - cap + 1, 0)]:
-                self._delete(row)
+                (
+                    r for r in left
+                    if r["thread_id"] not in self.active
+                    and not (protect_recent and _age_seconds(_last_used(r)) < keep)
+                ),
+                key=lambda r: (_last_used(r), r["created_at"], r["review_id"]),
+            )  # fmt: skip
+            if len(idle) < need:
+                raise ApiError(429, "the demo is full right now; try again in a little while")
+            doomed |= {r["review_id"]: r for r in idle[:need]}
+        for row in doomed.values():
+            self._delete(row)
 
     def _check_running(self, who) -> None:
         if not self.limits:
@@ -191,6 +212,8 @@ class ReviewManager:
             ref = {"review_id": rid, "thread_id": tid, "repo": repo, "pr": pr,
                    "sha": head.head_sha}  # fmt: skip
 
+            if self.limits and self.store.get_review(rid):
+                self.store.touch(rid)  # reopening counts as using it
             if tid in self.active:
                 return 200, {**ref, "status": self.store.get_review(rid)["status"]}
 
@@ -199,13 +222,13 @@ class ReviewManager:
             if existing and self._state(tid).values:
                 snapshot = self._state(tid)
                 if not snapshot.next:
-                    self._ensure_row(rid, tid, repo, pr, head.head_sha, "posted", who.owner)
+                    self._ensure_row(rid, tid, repo, pr, head.head_sha, "posted", who)
                     self.store.update_review(rid, status="posted")
                     return 200, {**ref, "status": "posted"}
                 if snapshot.next == ("approval",):
                     status = "failed" if snapshot.interrupts[0].value["status"] == "failed" \
                         else "awaiting_approval"  # fmt: skip
-                    self._ensure_row(rid, tid, repo, pr, head.head_sha, status, who.owner)
+                    self._ensure_row(rid, tid, repo, pr, head.head_sha, status, who)
                     return 200, {**ref, "status": self.store.get_review(rid)["status"]}
                 graph_input = None  # interrupted mid run: resume from the last checkpoint
 
@@ -213,9 +236,9 @@ class ReviewManager:
             if self.limits and self.store.get_review(rid) is None:
                 if self.new_reviews.full(who.client):
                     raise ApiError(429, "hourly demo limit reached for your network; try later")
+                self._make_room(who)
                 self.new_reviews.hit(who.client)
-                self._make_room(who.owner)
-            self._ensure_row(rid, tid, repo, pr, head.head_sha, "running", who.owner)
+            self._ensure_row(rid, tid, repo, pr, head.head_sha, "running", who)
             self.store.update_review(rid, status="running", error=None)
             self.callers[tid] = who
             self._launch(rid, tid, graph_input, resuming=False)
@@ -340,6 +363,16 @@ class ReviewManager:
             "last_event_id": events[-1]["id"] if events else 0,
             **timeline(events),
         }
+
+
+def _last_used(row: dict) -> str:
+    return max(row["updated_at"], row.get("used_at") or "")
+
+
+def _age_seconds(stamp: str) -> float:
+    if not stamp:
+        return float("inf")
+    return (datetime.now(UTC) - datetime.fromisoformat(stamp)).total_seconds()
 
 
 def timeline(events: list[dict]) -> dict:

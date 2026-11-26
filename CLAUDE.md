@@ -227,12 +227,21 @@ The checkpointer is what lets the graph stop at approval and pick up later, even
   are never forwarded), and the API stores a sha256 prefix as `reviews.owner`. Thread id gets
   `~v-<owner hash>` after `repo#pr@sha`, so the same link is a fresh run per visitor; existing
   threads are found in the store, not by scanning checkpoints. Another visitor's review is a 404.
-  Limits in `api/limits.py` (running per visitor / IP / total, new per IP per hour, stored per
-  visitor / total, 24 h expiry, decision calls, open streams, 64 KB bodies, docs off); counters are
-  in memory, so one worker. Deleting a review deletes its events and checkpoints. Streams close
+  Limits in `api/limits.py` (running per visitor / network / total, new per network per hour,
+  stored 10 per visitor / 30 per network / 200 total, 24 h expiry, decision calls, open streams,
+  64 KB bodies, docs off); a network is an IPv4 address or an IPv6 /64 (`visitors.network`).
+  Storage eviction is planned before anything is deleted: the visitor cap may delete their own
+  oldest idle review even if recent; the network and total caps never delete a review used in the
+  last 30 minutes (`used_at`, touched at most once a minute on read, stream, decide or reopen) and
+  answer 429 "the demo is full" instead. Counters are in memory, so one worker. Load at a
+  simulated 0.1 CPU: 8 concurrent reviews plus 40 held streams were fine, so the total stays 8. Deleting a review deletes its events and checkpoints. Streams close
   after 290 s (Vercel's limit is 300 s) and the browser reconnects with Last-Event-ID. The browser
   stops streaming while a review awaits approval and resumes after posting or on tab focus. Demo
-  screens never link the fake `#demo-` post URLs. Playwright runs against `api.public`.
+  screens never link the fake `#demo-` post URLs. With `health.public` the home page has no link
+  input or paste text, only Try the demo (fresh run of PR #4); local mode, including local demo
+  mode, keeps the input. The approval screen pings `/health` every 5 min while the tab is visible,
+  for at most 30 min (`use-keep-awake.ts`), so Render does not sleep mid decision. Vercel
+  `supportsCancellation` confirmed live. Playwright runs against `api.public`.
 - **Repo location:** `~/code/reviewpilot` (outside iCloud). The sandbox clone is at
   `~/code/reviewpilot-sandbox`.
 - **Holdout discipline:** PRs #6 to #15 (Stage 9 holdout split) are never used for tuning. #1 and

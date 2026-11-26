@@ -14,6 +14,7 @@ from api.app import create_app
 from api.limits import HourlyRate, PublicLimits
 from api.public import FORBIDDEN, create_public_app, public_settings
 from api.store import Store
+from api.visitors import network
 from reviewpilot.config import Settings
 from reviewpilot.demo import DemoGitHub, demo_model_factory
 from tests.test_api import read_events
@@ -273,8 +274,24 @@ def checkpoints(app, thread_id: str) -> list:
     return list(app.state.manager.saver.list({"configurable": {"thread_id": thread_id}}))
 
 
-async def test_storage_caps_delete_the_oldest_reviews_with_their_events_and_checkpoints(tmp_path):
-    app = limited_app(tmp_path, stored_per_visitor=2, stored_total=3)
+OLD = "2000-01-01T00:00:00+00:00"
+
+
+def age(app, rid: str, stamp: str = OLD) -> None:
+    """As if nobody had used this review since `stamp`."""
+    app.state.manager.store.update_review(rid, used_at=stamp)
+    with app.state.manager.store._conn as conn:
+        conn.execute("update reviews set updated_at = ? where review_id = ?", (stamp, rid))
+
+
+def visitor(n: int) -> str:
+    return f"{n:032d}"
+
+
+async def test_visitor_cap_deletes_their_oldest_even_if_recent_with_events_and_checkpoints(
+    tmp_path,
+):
+    app = limited_app(tmp_path, stored_per_visitor=2)
     async with client_for(app) as client:
         first = await reach_approval(client, ALICE)
         thread = stored(app)[0]["thread_id"]
@@ -285,9 +302,63 @@ async def test_storage_caps_delete_the_oldest_reviews_with_their_events_and_chec
         assert checkpoints(app, thread) == []
         assert app.state.manager.store.events_after(first) == []
 
-        await reach_approval(client, BOB)
-        await reach_approval(client, "c" * 32, ip="198.51.100.7")
-        assert len(stored(app)) == 3
+
+async def test_network_cap_deletes_that_networks_oldest_idle_review(tmp_path):
+    app = limited_app(tmp_path, stored_per_client=2)
+    async with client_for(app) as client:
+        here, elsewhere = "203.0.113.1", "198.51.100.7"
+        first = await reach_approval(client, visitor(1), ip=here)
+        second = await reach_approval(client, visitor(2), ip=here)
+        other = await reach_approval(client, visitor(3), ip=elsewhere)
+        age(app, other)  # older than anything, but on another network: never a candidate
+        age(app, first, "2000-01-02T00:00:00+00:00")
+        age(app, second, "2000-01-03T00:00:00+00:00")
+        third = await reach_approval(client, visitor(4), ip=here)
+        assert {r["review_id"] for r in stored(app)} == {second, other, third}
+
+
+async def test_recent_reviews_are_never_deleted_for_the_network_or_total_cap(tmp_path):
+    app = limited_app(tmp_path, stored_per_client=2, stored_total=3)
+    async with client_for(app) as client:
+        first = await reach_approval(client, visitor(1))
+        await reach_approval(client, visitor(2))
+        full = await start(client, visitor(3))
+        assert full.status_code == 429 and "demo is full" in full.json()["detail"]
+        assert len(stored(app)) == 2  # a refused start deletes nothing
+
+        # Looking at a review counts as using it, so it is protected again.
+        age(app, first)
+        assert (await client.get(f"/reviews/{first}", headers=headers(visitor(1)))).status_code \
+            == 200  # fmt: skip
+        assert (await start(client, visitor(3))).status_code == 429
+
+        age(app, first)
+        await reach_approval(client, visitor(3))
+        assert first not in {r["review_id"] for r in stored(app)}
+
+        # The total cap: everything recent, on other networks too.
+        await reach_approval(client, visitor(4), ip="198.51.100.7")
+        full = await start(client, visitor(5), ip="192.0.2.9")
+        assert full.status_code == 429 and "demo is full" in full.json()["detail"]
+
+
+async def test_ipv6_is_counted_by_its_64(tmp_path):
+    app = limited_app(tmp_path, delay_scale=0.1)
+    async with client_for(app) as client:
+        same = ("2001:db8:1:2::1", "2001:db8:1:2:ffff::9", "2001:0db8:0001:0002:aaaa::1")
+        assert (await start(client, visitor(1), ip=same[0])).status_code == 202
+        assert (await start(client, visitor(2), ip=same[1])).status_code == 202
+        third = await start(client, visitor(3), ip=same[2])
+        assert third.status_code == 429 and "network" in third.json()["detail"]
+        assert (await start(client, visitor(4), ip="2001:db8:1:3::1")).status_code == 202
+        await asyncio.gather(*app.state.manager.active.values())
+
+
+def test_network_grouping():
+    assert network("2001:db8:1:2:3:4:5:6") == "2001:db8:1:2::/64"
+    assert network("::ffff:203.0.113.5") == "203.0.113.5"
+    assert network(" 203.0.113.5 ") == "203.0.113.5"
+    assert network("not-an-ip") == "not-an-ip"
 
 
 async def test_reviews_expire(tmp_path):
@@ -295,7 +366,7 @@ async def test_reviews_expire(tmp_path):
     async with client_for(app) as client:
         rid = await reach_approval(client, ALICE)
         thread = stored(app)[0]["thread_id"]
-        app.state.manager.store.update_review(rid, created_at="2000-01-01T00:00:00+00:00")
+        app.state.manager.store.update_review(rid, created_at=OLD)
         assert (await client.get("/reviews", headers=headers(ALICE))).json() == []
         assert (await client.get(f"/reviews/{rid}", headers=headers(ALICE))).status_code == 404
         assert checkpoints(app, thread) == []

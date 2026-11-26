@@ -13,7 +13,11 @@ class PublicLimits:
     running_total: int = 8
     new_per_client_per_hour: int = 20
     stored_per_visitor: int = 10
+    stored_per_client: int = 30
     stored_total: int = 200
+    # A review used this recently is never deleted to make room under the per client or total
+    # caps (the visitor's own cap may still remove their oldest).
+    keep_recent_minutes: float = 30
     ttl_hours: float = 24
     decision_calls_per_review: int = 20
     streams_per_visitor: int = 4

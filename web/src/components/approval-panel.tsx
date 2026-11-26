@@ -5,6 +5,7 @@ import Link from "next/link";
 import { api, ApiError, friendlyError, type PendingItem } from "@/lib/api";
 import { approveAll, choose, initialChoices, outcome, tally, toDecisions, type Choices } from "@/lib/decisions";
 import { DEMO_UNAVAILABLE } from "@/lib/demo";
+import { useKeepAwake } from "@/lib/use-keep-awake";
 import { Button, ErrorBox, SeverityBadge, Spinner } from "./ui";
 
 type Section = { key: string; title: string; note?: string; items: PendingItem[] };
@@ -31,6 +32,7 @@ export function ApprovalPanel({
   const [error, setError] = useState<{ title: string; detail: string; gone?: boolean } | null>(null);
   const [focus, setFocus] = useState(0);
   const refs = useRef<Record<string, HTMLDivElement | null>>({});
+  useKeepAwake(demo);
 
   const sections: Section[] = useMemo(
     () =>

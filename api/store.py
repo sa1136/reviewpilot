@@ -22,7 +22,9 @@ create table if not exists reviews (
     cost_usd real not null default 0,
     error text,
     posted text,
-    owner text not null default ''
+    owner text not null default '',
+    client text not null default '',
+    used_at text not null default ''
 );
 create table if not exists events (
     review_id text not null,
@@ -47,20 +49,37 @@ class Store:
         with self._lock:
             self._conn.executescript(SCHEMA)
             columns = [r["name"] for r in self._conn.execute("pragma table_info(reviews)")]
-            if "owner" not in columns:  # a history file from before the public demo
-                self._conn.execute("alter table reviews add column owner text not null default ''")
+            for column in ("owner", "client", "used_at"):  # history files from before the demo
+                if column not in columns:
+                    self._conn.execute(
+                        f"alter table reviews add column {column} text not null default ''"
+                    )
 
     def close(self) -> None:
         self._conn.close()
 
     def create_review(
-        self, review_id, thread_id, repo, pr, sha, status, title="", owner=""
+        self, review_id, thread_id, repo, pr, sha, status, title="", owner="", client=""
     ) -> None:
         with self._lock, self._conn:
             self._conn.execute(
                 "insert or ignore into reviews (review_id, thread_id, repo, pr, title, sha, "
-                "status, created_at, updated_at, owner) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (review_id, thread_id, repo, pr, title, sha, status, now(), now(), owner),
+                "status, created_at, updated_at, owner, client, used_at) "
+                "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    review_id,
+                    thread_id,
+                    repo,
+                    pr,
+                    title,
+                    sha,
+                    status,
+                    now(),
+                    now(),
+                    owner,
+                    client,
+                    now(),
+                ),  # fmt: skip
             )
 
     def update_review(self, review_id: str, **fields) -> None:
@@ -81,9 +100,13 @@ class Store:
             ).fetchone()
         return _review(row) if row else None
 
-    def list_reviews(self, owner: str | None = None) -> list[dict]:
-        """Newest first. All reviews, or only `owner`'s."""
-        where, args = ("where owner = ? ", (owner,)) if owner is not None else ("", ())
+    def list_reviews(self, owner: str | None = None, client: str | None = None) -> list[dict]:
+        """Newest first. All reviews, or only `owner`'s, or only `client`'s."""
+        where, args = "", ()
+        if owner is not None:
+            where, args = "where owner = ? ", (owner,)
+        elif client is not None:
+            where, args = "where client = ? ", (client,)
         with self._lock:
             rows = self._conn.execute(
                 f"select * from reviews {where}order by created_at desc", args
@@ -103,6 +126,13 @@ class Store:
             for r in rows
             if r["thread_id"] == base or r["thread_id"].startswith(f"{base}~")
         ]
+
+    def touch(self, review_id: str) -> None:
+        """Record that someone looked at or acted on this review."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "update reviews set used_at = ? where review_id = ?", (now(), review_id)
+            )
 
     def delete_review(self, review_id: str) -> None:
         with self._lock, self._conn:
