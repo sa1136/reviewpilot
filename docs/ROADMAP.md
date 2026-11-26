@@ -27,6 +27,13 @@ Single source of truth for building ReviewPilot in Claude Code. CLAUDE.md holds 
 | 9 | LangSmith evals, README, results | Done | Holdout (10 unseen PRs, 3 runs): 84 of 84 bugs, 16 false positives (82% precision), $0.0024 per review. Default now Haiku everywhere |
 | 10 | Deploy, GitHub Action auto mode, GitHub App | Optional | |
 
+### Public demo deploy (Stage 10, first step): live tests pending
+
+* Live: https://reviewpilot-pi-six.vercel.app
+* API: https://reviewpilot-ganf.onrender.com
+* Commit 30323a4 passed CI and is deployed on Vercel and Render.
+* Pending live tests: two browser privacy, no link input, 20 minute visible approval, 20 minute hidden or closed approval, stream reconnect.
+
 ## Decisions log (do not undo without asking)
 
 * Agents: correctness, security, quality. `num_agents` 1 runs correctness, 2 adds quality, 3 runs all.
